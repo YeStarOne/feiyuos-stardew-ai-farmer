@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>FeiyuAutoLoad</AssemblyName>
+    <RootNamespace>FeiyuAutoLoad</RootNamespace>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="SMAPI"><HintPath>G:\量化系统安装包\V1.6.15\StardewModdingAPI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="StardewValley"><HintPath>G:\量化系统安装包\V1.6.15\Stardew Valley.dll</HintPath><Private>false</Private></Reference>
+      <Reference Include="xTile"><HintPath>G:\量化系统安装包\V1.6.15\xTile.dll</HintPath><Private>false</Private></Reference>
+      <Reference Include="MonoGame.Framework"><HintPath>G:\量化系统安装包\V1.6.15\MonoGame.Framework.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

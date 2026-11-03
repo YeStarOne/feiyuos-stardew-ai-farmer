@@ -89,11 +89,15 @@ export async function useOn(tx, ty) {
 }
 
 // 传送并等待切场景完成；失败自动重试（warp 返回的 actual 是旧位置，必须轮询 location）
-export async function warp(loc, x, y) {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    await post('/warp', { location: loc, x, y });
-    for (let i = 0; i < 8; i++) {
-      await sleep(1200);
+// opts.tries/polls/wait: 时间敏感场景用快档(2026-11-02 用户"磨蹭太久被动传送回家": 默认4×8×1.2s≈40s/次, 入口链18点能把一整天烧光)
+export async function warp(loc, x, y, opts = {}) {
+  const tries = opts.tries ?? 4, polls = opts.polls ?? 8, wait = opts.wait ?? 1200;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    const r0 = await post('/warp', { location: loc, x, y }).catch(() => null);
+    // 桥明确拒绝(落点站不住/超解锁范围)→不空轮询, 立即失败返回
+    if (r0 && (r0.ok === false || r0.skipped_warp)) return { loc, x, y, failed: true, rejected: true, raw: r0 };
+    for (let i = 0; i < polls; i++) {
+      await sleep(wait);
       const s = await st();
       const cur = s.location?.name || s.location;
       if (cur === loc) return { loc: cur, x: s.player.x, y: s.player.y };

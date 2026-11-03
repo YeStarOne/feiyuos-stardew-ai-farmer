@@ -1,0 +1,9 @@
+{
+  "Name": "FeiyuAutoLoad",
+  "Author": "Feiyu",
+  "Version": "1.0.0",
+  "Description": "Auto load newest save at startup, skip title screen.",
+  "UniqueID": "feiyu.autoload",
+  "EntryDll": "FeiyuAutoLoad.dll",
+  "MinimumApiVersion": "4.0.0"
+}
