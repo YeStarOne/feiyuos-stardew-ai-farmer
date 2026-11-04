@@ -115,6 +115,13 @@ async function tryQuests() {
 
 // ===== 单日流程 =====
 async function playOneDay(day) {
+  // ⭐2026-11-06: 晨间先出床 —— 睡醒人躺在床上, 后续 waterAll/寻路全在床里空磨几十分钟(两次实测)。
+  //   /wakeup 对在床上的人 = 正确用法(传送到农场门口); 对没在床上的人才有瞬移副作用, 这里已用 isInBed 把门。
+  if ((await st()).player?.isInBed) {
+    log('晨间在床上, /wakeup 出床');
+    await post('/wakeup', {}).catch(() => { });
+    await sleep(2000);
+  }
   // 0. 先找木箱(农场→农舍都扫) + 清晨满包先清仓(带上箱子可存非卖品)
   let chest = await findChest(18);
   if (chest) chest.loc = (await st()).location?.name || 'Farm'; // 箱子可能扫在任意地图, 按实际位置记
