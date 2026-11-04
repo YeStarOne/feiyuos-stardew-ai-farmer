@@ -110,6 +110,14 @@ t('指令解析', () => {
   assert.equal(parseCmd('不知道做什么').op, 'todo');
 });
 
+t('新指令: 农场/破环/催熟', () => {
+  assert.equal(parseCmd('农场怎么样').op, 'farm');
+  assert.equal(parseCmd('田里怎么样').op, 'farm');
+  assert.equal(parseCmd('卡床上了').op, 'breakloop');
+  assert.equal(parseCmd('赖床').op, 'breakloop');
+  assert.equal(parseCmd('催熟').op, 'ripen');
+});
+
 t('待办清单给得出目标', () => {
   const list = todoList(STATE, TILES);
   assert.ok(list.some((x) => /收菜/.test(x)));

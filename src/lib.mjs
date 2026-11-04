@@ -7,6 +7,9 @@
 //   ③ 通用右键收割 harvestCrops(/harvest 收不掉的作物如草莓)
 //   ④ 木箱: findChest / storeToChest / craftChest / placeChestNearHouse
 //   ⑤ 移植验证过的 chopWood(砍树) / tillTiles+expandField(翻地扩田)
+//   ⑧种田三步铁律(2026-11-05用户拍板, 违反=白干): ①作物种在整块连续区域(禁止东一格西一格)
+//      ②下种前必须先清场(行为学框选清枯枝/杂草/石块) ③流程=清场→锄地(翻土)→才准拿种子
+//      (实测多次看到拿种子到处跑/锄头翻杂草=种子全废); 参考BehaviorAutomation三遍走: 清场→Hoe→Seeds
 const BASE = 'http://localhost:7842';
 import fs from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -535,6 +538,54 @@ export async function sellAndStore(chest, force = false) {
   if (sold) ledInc('itemsSold', sold, '清仓卖出');
   if (stored) ledInc('itemsStored', stored, '存木箱');
   return sold;
+}
+
+// ================= 无点击卖货 (2026-11-04 ilspycmd 反编译实锤) =================
+// 源码证据(HandleSell): farm.getShippingBin(player).Add(item) —— 直接把物品塞进出货箱,
+// 零物理点击、零 UI、零前台依赖; 下次睡觉结算照常变成钱。
+// ⚠️ 必须逐个按名字投; 绝不能传 all:true(源码里 sellAll 分支跳过名字过滤 = 卖光非种子非工具非任务品)
+// ⚠️ 必须在 Farm 地图(源码: getShippingBin 只对 Farm 有效, 否则 "No shipping bin found")
+// 返回 { ok, sold:[{item,count,price}], totalItems }
+export async function sellByName(name, count) {
+  const body = count ? { name, count } : { name };
+  return post('/sell', body);
+}
+
+// 把所有 isSellable(且不在 QUEST_RESERVE) 的整叠逐个投进出货箱, 不依赖前台
+// 与旧 openBin 的区别: 无物理右键 → 用户在用电脑时也能卖
+export async function sellAllWhitelisted(verbose = true) {
+  const cur = await st();
+  const loc = cur.location?.name || cur.location;
+  if (loc !== 'Farm') {
+    const w = await warp('Farm', 72, 15).catch(() => null);
+    if ((await st()).location?.name !== 'Farm') {
+      if (verbose) log('不在 Farm 且 warp 失败, 无法用出货箱');
+      return 0;
+    }
+  }
+  let total = 0;
+  for (let round = 0; round < 12; round++) {
+    const s = await st();
+    const items = s.inventory.filter(i => i.name && isSellable(i.name) && !QUEST_RESERVE[i.name]);
+    if (!items.length) break;
+    let moved = 0;
+    for (const it of items) {
+      const r = await sellByName(it.name);
+      if (r?.ok && Array.isArray(r.sold) && r.sold.length) {
+        moved += r.sold.reduce((a, x) => a + (x.count ?? 1), 0);
+        if (verbose) log('投箱', it.name + 'x' + (it.stack ?? 1), '→', (r.sold[0]?.price ?? 0) + 'g');
+        ledInc('itemsSold', r.sold.length, '投出货箱');
+      } else {
+        if (verbose) log('投箱失败', it.name, JSON.stringify(r).slice(0, 80));
+        break;
+      }
+    }
+    total += moved;
+    if (!moved) break;
+  }
+  const s2 = await st();
+  if (verbose) log('无点击卖货完成:', total, '件 | 包里还剩可卖', s2.inventory.filter(i => i.name && isSellable(i.name) && !QUEST_RESERVE[i.name]).length, '种');
+  return total;
 }
 
 // 室内传送(2026-10-29验证: POST /warp_into {location,x,y})

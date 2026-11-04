@@ -32,6 +32,9 @@ const state = {
     { name: 'Axe', stack: 1 }, { name: 'Watering Can', stack: 1, waterLeft: 3, waterMax: 40 },
     { name: 'Hoe', stack: 1 }, { name: 'Scythe', stack: 1 },
     { name: 'Blueberry Seeds', stack: 6 },
+    { name: 'Parsnip', stack: 5, value: 35 },      // 可卖农作物(白名单内)
+    { name: 'Sardine', stack: 2, value: 40 },      // 可卖鱼(白名单内)
+    { name: 'Fiber', stack: 12 },                  // 不该卖(非白名单)
   ],
   heldItem: { name: 'Blueberry Seeds' }, activeMenu: null,
 };
@@ -90,8 +93,12 @@ const routes = {
     void p;
     return { ok: true, harvested: n };
   },
+  // 真桥: GetParam<string>(p,"operation"), 只认 water|till; 不认 ops(b.ops 会被当 undefined 拒掉)
   '/tool_area': (b) => {
-    if (b.ops === 'water') {
+    if (!['water', 'till'].includes(b.operation)) {
+      return { ok: false, error: "operation must be 'water' or 'till'" };
+    }
+    if (b.operation === 'water') {
       let n = 0;
       for (const t of world.values()) {
         if (t.x >= b.x1 && t.x <= b.x2 && t.y >= b.y1 && t.y <= b.y2 && t.crop && t.watered === false) {
@@ -103,7 +110,7 @@ const routes = {
       }
       return { ok: true, op: 'water', watered: n };
     }
-    if (b.ops === 'till') {
+    if (b.operation === 'till') {
       let n = 0;
       for (const t of world.values()) {
         if (t.x >= b.x1 && t.x <= b.x2 && t.y >= b.y1 && t.y <= b.y2 && !t.crop && !t.object && t.passable
@@ -111,7 +118,7 @@ const routes = {
       }
       return { ok: true, op: 'till', tilled: n };
     }
-    return { ok: false, error: "operation must be 'water' or 'till'" };
+    return { ok: false, error: 'unreachable' };
   },
   '/use': () => {
     const p = state.player;
@@ -139,6 +146,43 @@ const routes = {
       return { ok: true, tile: { x: t.x, y: t.y }, planted: true };
     }
     return { ok: true, tile: { x: t.x, y: t.y } };
+  },
+  // 真桥 HandleSell: 必须在 Farm, 把物品从背包塞进出货箱(不经点击); all:true 会跳过名字过滤
+  '/sell': (b) => {
+    if (state.location?.name !== 'Farm') return { ok: false, error: 'No shipping bin found (must be on Farm)' };
+    const sold = [];
+    for (let i = state.inventory.length - 1; i >= 0; i--) {
+      const it = state.inventory[i];
+      if (!it?.name) continue;
+      const match = b.all ? (!/Seeds|Axe|Hoe|Watering Can|Scythe|Pickaxe/.test(it.name)) : (it.name === b.name);
+      if (!match) continue;
+      sold.push({ item: it.name, count: it.stack ?? 1, price: (it.value ?? 10) * (it.stack ?? 1) });
+      state.shippingBin = (state.shippingBin ?? 0) + (it.stack ?? 1);
+      state.inventory.splice(i, 1);
+    }
+    return sold.length ? { ok: true, sold, totalItems: sold.length }
+                      : { ok: false, error: "Item '" + b.name + "' not found in inventory" };
+  },
+  // 真桥 HandleCancelSleep: 四步原子破环
+  '/cancel_sleep': () => {
+    state.player.isInBed = false; state.activeMenu = null; state.dialogueUp = false;
+    return { ok: true, action: 'cancelled', wokeUp: true };
+  },
+  '/ready_state': () => ({ ok: true, isMaster: true, player: state.player.name,
+    checks: [{ id: 1, kind: 'ServerReadyCheck', state: 'Locking', numberReady: 1, numberRequired: 2, isReady: false }] }),
+  // 真桥 HandleRipen: crop.growCompletely()
+  '/ripen': (b, q) => {
+    let n = 0;
+    for (const t of world.values()) if (t.crop && !t.harvestable) { t.harvestable = true; t.cropPhase = 4; n++; }
+    return { ok: true, ripened: n };
+  },
+  // 真桥 HandleFarmReport: 全农场统一统计
+  '/farm_report': () => {
+    const crops = [...world.values()].filter((t) => t.crop);
+    return { ok: true, season: state.time.season, dayOfMonth: state.time.dayOfMonth, year: state.time.year,
+      crops: { total: crops.length, watered: crops.filter((t) => t.watered).length,
+               ready: crops.filter((t) => t.harvestable).length, byLocation: [] },
+      animals: { total: 0, animals: [] }, machines: { total: 0, machines: [] } };
   },
   '/refill': () => { const c = pick('Watering Can'); if (c) c.waterLeft = 40; return { ok: true, waterLeft: 40 }; },
   '/sleep': () => { state.player.isInBed = true; return { ok: true, inBed: true }; },

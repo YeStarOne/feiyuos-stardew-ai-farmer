@@ -235,6 +235,9 @@ export function parseCmd(cmd) {
   if (!c) return { op: 'help' };
   if (/帮助|怎么用|help|命令/.test(c)) return { op: 'help' };
   if (/世界|哪边是海|怎么走|方位/.test(c)) return { op: 'world' };
+  if (/农场怎么样|全农场|田里怎么样|多少株|浇了多少/.test(c)) return { op: 'farm' };
+  if (/卡床|赖床|起不来|没天亮|睡过头|天亮不了/.test(c)) return { op: 'breakloop' };
+  if (/催熟|强行熟|直接熟/.test(c)) return { op: 'ripen' };
   if (/地图|画个图/.test(c)) return { op: 'map' };
   if (/水壶|还有多少水|剩多少水/.test(c)) return { op: 'watercan' };
   if (/^(看看|状态|我在哪|情况)|看看周围|怎么回事/.test(c)) return { op: 'see' };

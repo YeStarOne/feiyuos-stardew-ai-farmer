@@ -3,16 +3,10 @@
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import fs from 'node:fs';
 
-import { fileURLToPath } from 'node:url';
-// 仓库内跑时 ROOT = src/ (fish-eye.mjs 的上一级); 也支持 STARDEW_ROOT 覆盖
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = process.env.STARDEW_ROOT || path.resolve(HERE, '..');
-const TMP = process.env.STARDEW_TMP || path.join(HERE, '.e2e-tmp');
+const ROOT = 'D:/StardewAI';
 const MOCK_PORT = 9143, EYE_PORT = 9151;
 const procs = [];
-fs.mkdirSync(TMP, { recursive: true });
 const start = (file, env) => {
   const p = spawn(process.execPath, [path.join(ROOT, file)], {
     cwd: ROOT, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
@@ -46,7 +40,7 @@ start('test/mock-bridge.mjs', { MOCK_PORT: String(MOCK_PORT) });
 start('fish-eye.mjs', {
   FISHEYE_PORT: String(EYE_PORT), FISHEYE_TARGET: 'fish',
   FISHEYE_BASE: `http://127.0.0.1:${MOCK_PORT}`, FISHEYE_RIVAL: `http://127.0.0.1:${MOCK_PORT}`,
-  FISHEYE_SEEN: path.join(TMP, 'seen-e2e.json'),
+  FISHEYE_SEEN: 'D:/StardewAI/test/.seen-e2e.json',
 });
 try {
   await waitUp(`http://127.0.0.1:${MOCK_PORT}/state`);
@@ -151,6 +145,30 @@ try {
     assert.match(g, /✅|已经到/);
     const h = await post('/harvest', { r: 6 });
     assert.ok(typeof h === 'string' && h.length);
+  });
+
+  await t('农场怎么样: 全农场统计(farm_report)', async () => {
+    const r = await say('农场怎么样');
+    assert.match(r, /全农场|作物/);
+    assert.match(r, /已浇水|可收/);
+  });
+
+  await t('卡床上了: 一句话破环并下床', async () => {
+    await fetch(`http://127.0.0.1:${MOCK_PORT}/sleep`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const st1 = await state();
+    assert.equal(st1.player.isInBed, true, '先让它上床');
+    const r = await say('卡床上了');
+    const st2 = await state();
+    assert.match(r, /破环/);
+    assert.equal(st2.player.isInBed, false, '应已下床: ' + r);
+  });
+
+  await t('催熟: 季末保收成', async () => {
+    const a = (await fetch(`http://127.0.0.1:${MOCK_PORT}/farm_report`).then((x) => x.json())).crops;
+    const r = await say('催熟');
+    const b = (await fetch(`http://127.0.0.1:${MOCK_PORT}/farm_report`).then((x) => x.json())).crops;
+    assert.match(r, /催熟|可收|已经有/);
+    assert.ok(b.ready >= a.ready, `可收数不该减: ${a.ready} → ${b.ready}`);
   });
 
   await t('selftest 探针能出报告', async () => {

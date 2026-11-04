@@ -34,6 +34,7 @@ const log = (...a) => {
   try { fs.appendFileSync(LOG_PATH, line + '\n'); } catch { }
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const NL = String.fromCharCode(10);
 
 // ---------- 桥调用(带超时, 绝不让她等死) ----------
 async function api(base, path, opts = {}, timeout = 15000) {
@@ -116,6 +117,7 @@ function helpText(who) {
   世界怎么走              哪边是海、家在哪、矿在哪 → 一句话方位图
   水壶还有多少水          壶里剩多少, 不用掏出来看
   该干嘛                  给你个目标(没目标时看这个)
+  农场怎么样              全农场一次统计: 多少株/浇了多少/多少能收
 
 干:
   收菜                    一次把周围的熟作物全收进包
@@ -124,6 +126,10 @@ function helpText(who) {
   锄地                    把身边一片空地锄出来(整块, 不东一口西一口)
   种蓝莓 / 种番茄 ...     先除草→锄地→才下种, 整块种在一起
   去田边 / 回家 / 去镇子   一句话走过去(自动寻路, 不用一格一格点)
+
+修:
+  卡床上了                两人都躺床上天亮不了时, 一句话破环下床(不用重开游戏)
+  催熟                    季末最后一天保收成: 把没熟的强行催熟(仅季末用)
 
 规矩(我照这个执行, 你放心):
   · 不卖你的东西; 不整理你背包; 不动你的收藏
@@ -167,6 +173,32 @@ async function goto(to) {
     if (s?.activeMenu) await post('/menu_close', {});
   }
   return fail(`没走到【${lm.name}】(${lm.loc} ${spot[0]},${spot[1]})。可能被墙挡着或没解锁, 我再想想别的路。`);
+}
+
+// ---------- 全农场统计(/farm_report 一次扫所有地图) ----------
+// 反编译证据: HandleFarmReport 遍历 ResolveLocations("") 汇总 crops{total,watered,ready,byLocation}
+// + animals + machines —— 不用再扫半径10 猜全田(以前就因此误报"30株没浇水")
+async function farmOverview() {
+  const r = await post('/farm_report', {}, 25000);
+  if (!r?.ok) return fail('农场统计读不到: ' + (r?.error || '桥没回'));
+  const c = r.crops || {};
+  const lines = [
+    `${seasonCN(r.season)}${r.dayOfMonth}日(第${r.year}年) 全农场:`,
+    `  作物 ${c.total ?? 0} 株 — 已浇水 ${c.watered ?? 0}, 可收 ${c.ready ?? 0}${(c.total ?? 0) > (c.watered ?? 0) ? `, 还差 ${(c.total ?? 0) - (c.watered ?? 0)} 株没浇` : ''}`,
+  ];
+  const byLoc = (c.byLocation || []).filter((x) => x && (x.total ?? 0) > 0);
+  if (byLoc.length) {
+    lines.push('  分地图: ' + byLoc.map((x) => `${x.location || x.name} ${x.total}株(湿${x.watered}/熟${x.ready})`).join(' | '));
+  }
+  if (r.animals?.total) lines.push(`  动物 ${r.animals.total} 只`);
+  if (r.machines?.total) {
+    const ready = (r.machines.machines || []).filter((m) => m?.readyForHarvest || m?.ready).length;
+    lines.push(`  机器 ${r.machines.total} 台${ready ? `, ${ready} 台出成品了` : ''}`);
+  }
+  const crops = c.total ?? 0;
+  if (crops && !(c.ready ?? 0) && (c.watered ?? 0) === crops) lines.push('  → 全部浇过水了, 安心等熟');
+  if ((c.ready ?? 0) > 0) lines.push('  → 有熟的! 说"收菜"我就去收');
+  return lines.join(NL);
 }
 
 // ---------- 动作: 收割(HTTP /harvest, 无点击) ----------
@@ -218,7 +250,7 @@ async function water(r = 12) {
   // 批量: /tool_area ops=water 一次浇一片
   const x1 = Math.min(...dry.map((t) => t.x)), x2 = Math.max(...dry.map((t) => t.x));
   const y1 = Math.min(...dry.map((t) => t.y)), y2 = Math.max(...dry.map((t) => t.y));
-  const batch = await post('/tool_area', { ops: 'water', x1, y1, x2, y2 }, 120000);
+  const batch = await post('/tool_area', { operation: 'water', x1, y1, x2, y2 }, 120000);
   log('tool_area water:', JSON.stringify(batch).slice(0, 200));
   let left = 0, asked = false;
   const sr1 = await surr(r);
@@ -309,7 +341,7 @@ async function till(r = 6) {
   const x1 = Math.min(...cands.map((t) => t.x)), x2 = Math.max(...cands.map((t) => t.x));
   const y1 = Math.min(...cands.map((t) => t.y)), y2 = Math.max(...cands.map((t) => t.y));
   const before = cands.length;
-  const batch = await post('/tool_area', { ops: 'till', x1, y1, x2, y2 }, 120000);
+  const batch = await post('/tool_area', { operation: 'till', x1, y1, x2, y2 }, 120000);
   log('tool_area till:', JSON.stringify(batch).slice(0, 200));
   const sr2 = await surr(r);
   if (sr2?.tiles) remember(loc, sr2.tiles);
@@ -371,6 +403,41 @@ async function plant(seedWord, r = 6) {
   const msg = `种了 ${planted} 格【${seedCN(seedName)}】, 背包还剩 ${left} 颗种子`;
   if (fails.length) return `⚠️ ${msg}。有 ${fails.length} 格没成: ${fails.slice(0, 3).join('; ')}\n(还站得住的话再喊一次, 我接着种)`;
   return ok(msg + ` — 记得浇水(说"浇水")`);
+}
+
+// ---------- 赖床死循环破环(cancel_sleep 原子四步) ----------
+async function breakLoop() {
+  const before = await state();
+  // 桥不通时必须明说, 不能假装"破环完成"(否则她以为下床了其实啥也没发生)
+  if (!before?.player) {
+    return fail(`桥 ${BASE} 不通(${before?.error || '没回包'}) — 游戏没开/掉线了, 破不了环。先重连游戏再说。`);
+  }
+  const diag = await post('/ready_state', {}).catch(() => null);
+  const c = (diag?.checks || [])[0];
+  const diagTxt = c ? `${c.kind} ${c.numberReady}/${c.numberRequired} state=${c.state}` : '读不到 ready 详情';
+  const r1 = await post('/cancel_sleep', {});
+  const rival = await api(RIVAL_BASE, '/cancel_sleep', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, 8000).catch(() => null);
+  await sleep(1200);
+  const after = await state();
+  if (r1?.ok === false) return fail('破环失败: ' + (r1.error || '桥拒绝'));
+  if (after?.player?.isInBed) {
+    return `⚠️ 取消睡眠回包了但你还躺床上。诊断: ${diagTxt} — 试试说"回家"再"卡床上了"。`;
+  }
+  return ok(`破环完成: 之前(${before?.player?.isInBed ? '在床上' : '不在床'}) → 现在(${after?.player?.isInBed ? '还在床' : '已下床'})`
+    + NL + `  诊断: ${diagTxt}${rival?.ok ? NL + '  两端都已取消睡眠' : NL + '  ⚠️ 另一个人那边没响应'}`);
+}
+
+// ---------- 催熟(季末保收成专用) ----------
+async function ripen(r = 30) {
+  const rep = await post('/farm_report', {}, 20000);
+  const readyBefore = rep?.crops?.ready ?? 0;
+  const totalBefore = rep?.crops?.total ?? 0;
+  const res = await post('/ripen', { radius: Math.min(Math.max(Number(r) || 30, 1), 50) }, 30000);
+  if (!res?.ok) return fail('催熟失败: ' + (res?.error || '桥没回'));
+  const rep2 = await post('/farm_report', {}, 20000);
+  const readyAfter = rep2?.crops?.ready ?? 0;
+  return ok(`催熟了 ${res.ripened ?? 0} 株 — 可收数 ${readyBefore} → ${readyAfter} (全田 ${totalBefore} 株)`
+    + (readyAfter ? NL + '  现在说"收菜"就能一次收完' : NL + '  (可收数还是0, 检查半径/作物是否已全熟)'));
 }
 
 // ---------- 小工具 ----------
@@ -443,8 +510,16 @@ async function dispatch(cmd) {
     case 'plant': return plant(p.seed || p.raw, 6);
     case 'goto': return goto(p.to);
     case 'sleep': {
-      const r = await post('/sleep', {});
+      await post('/sleep', {});
       return ok('叫你去睡了(如果没在床上, 走到床边说"回家")—— 守卫 21:30 也会自动让你上床');
+    }
+    case 'farm': return farmOverview();
+    case 'breakloop': return breakLoop();
+    case 'ripen': {
+      // 季末保收成专用: /ripen 调的是游戏自己的 crop.growCompletely()
+      const f = await post('/farm_report', {}).catch(() => null);
+      if (f?.crops?.ready > 0) return `已经有 ${f.crops.ready} 株熟的, 先说"收菜"收掉再催熟更稳`;
+      return ripen(30);
     }
     default:
       return fail(`这句我还不会: "${c}"\n试试这些: 看看 / 地图 / 世界怎么走 / 水壶还有多少水 / 该干嘛 / 收菜 / 浇水 / 打水 / 锄地 / 种蓝莓 / 去田边 / 回家 / 帮助`);
@@ -464,7 +539,7 @@ async function selftest() {
   add('/walk_to 寻路', w?.ok === false ? false : (w?.walk_started !== undefined || w?.ok ? `回包 ${JSON.stringify(w).slice(0, 80)}` : `回包 ${JSON.stringify(w).slice(0, 80)}`));
   const h = await post('/harvest', {}, 20000);
   add('/harvest 批量收割', h?.ok === false ? false : `回包 ${JSON.stringify(h).slice(0, 80)}`);
-  const ta = await post('/tool_area', { ops: 'till', x1: -1, y1: -1, x2: -1, y2: -1 }, 20000);
+  const ta = await post('/tool_area', { operation: 'till', x1: -1, y1: -1, x2: -1, y2: -1 }, 20000);
   add('/tool_area 批量锄/浇', ta?.ok === false ? false : `回包 ${JSON.stringify(ta).slice(0, 100)}`);
   const rv = await rivalGet('/state');
   add(`另一个人桥 ${RIVAL_BASE}`, rv?.player ? `在${rv.location?.name} 时间${clockOf(rv.time?.timeOfDay)}` : false);
@@ -491,6 +566,9 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/world') return send(200, WORLD);
     if (u.pathname === '/todo') return send(200, await dispatch('该干嘛'));
     if (u.pathname === '/watercan') return send(200, await dispatch('水壶还有多少水'));
+    if (u.pathname === '/farm') return send(200, await farmOverview());
+    if (u.pathname === '/breakloop') return send(200, await breakLoop());
+    if (u.pathname === '/ripen') return send(200, await ripen(30));
     if (u.pathname === '/say') {
       let cmd = u.searchParams.get('cmd');
       if (req.method === 'POST') {
@@ -511,6 +589,8 @@ const server = http.createServer(async (req, res) => {
       if (u.pathname === '/till') return send(200, await till(Number(b.r) || 6));
       if (u.pathname === '/plant') return send(200, await plant(b.seed, Number(b.r) || 6));
       if (u.pathname === '/refill') return send(200, await refill());
+      if (u.pathname === '/ripen') return send(200, await ripen(Number(b.r) || 30));
+      if (u.pathname === '/breakloop') return send(200, await breakLoop());
     }
     return send(404, '不知道这个接口。GET / 看说明书');
   } catch (e) {
