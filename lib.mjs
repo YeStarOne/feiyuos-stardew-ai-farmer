@@ -25,7 +25,10 @@ const BASE = process.env.STARDEW_BASE || 'http://localhost:7842';
 import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 
-export const get = async (p) => (await fetch(BASE + p)).json();
+// 2026-11-06: 所有桥调用加超时 —— 曾因一个无超时 fetch 挂死整个 day-loop 半小时(主持躺床上没人管)
+export const FETCH_TIMEOUT = Number(process.env.STARDEW_FETCH_TIMEOUT || 30000);
+const fetchTO = (ms) => AbortSignal.timeout(ms);
+export const get = async (p) => (await fetch(BASE + p, { signal: fetchTO(FETCH_TIMEOUT) })).json();
 
 // ================= 行动日志 (star 项目 0.3.22 借鉴, 2026-10-30 落地) =================
 // 每个副作用动作都落 D:/StardewAI/action-journal.jsonl: {t,id,endpoint,body,result}
@@ -50,9 +53,10 @@ export function readJournal(n = 20) {
   } catch { return []; }
 }
 
-export const post = async (p, b = {}) => {
+export const post = async (p, b = {}, timeoutMs) => {
   const r = await (await fetch(BASE + p, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b)
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b),
+    signal: fetchTO(timeoutMs || FETCH_TIMEOUT)
   })).json();
   jour(p, b, r);
   return r;

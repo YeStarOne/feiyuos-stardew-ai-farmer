@@ -180,7 +180,15 @@ async function playOneDay(day) {
 
   // 3. 钓鱼 (体力<15 收工 = 用完再睡不浪费; 背包>=10 清仓)
   const bw = await warp('Beach', 44, 35);
-  if (!bw.failed) {
+  log('去海滩:', bw?.failed ? '失败 ' + JSON.stringify(bw).slice(0, 80) : '成功'); // 2026-11-06: 钓鱼段曾被无声跳过, 补日志
+  // ⭐2026-11-06: /warp 是"下一 tick 落地", 只查 bw.failed 会在人还没离开农场时就开钓 → 田里抛竿(用户抓现行)
+  let onBeach = false;
+  for (let i = 0; i < 8; i++) {
+    await sleep(1000);
+    if ((await st()).location?.name === 'Beach') { onBeach = true; break; }
+  }
+  if (!onBeach) log('warp 海滩没落地, 跳过钓鱼段(防田里抛竿)');
+  if (onBeach) {
     // 2026-11-06 坑: 鱼竿名字写死 Bamboo Pole, 实际包里是 Fiberglass Rod → sel 失败举着种子钓一天
     const rod = (await st()).inventory.find(i => /Rod|Pole/i.test(i?.name || ''));
     if (!rod) { log('没有鱼竿, 跳过钓鱼段'); }
@@ -243,6 +251,16 @@ async function playOneDay(day) {
   // 4. 尾清仓 + 睡觉(重试 3 轮)
   log('fishbot OFF =', await fishbotSet(false));
   await manageInventory(chest, true);
+  // ⭐2026-11-06: 钓鱼段被跳过时曾 13:40 就上床 → 睡不成又把 ready-check 挂着堵死鱼鱼。
+  //   没到 bedtime(21:00/体力<15)绝不睡, 原地等到点。
+  for (let i = 0; ; i++) {
+    const sW = await st();
+    if (sW.time.dayOfMonth > day) { log('天已经翻了(别人睡了), 直接进入明日'); return sW; }
+    if (sW.time.timeOfDay >= 2100 || sW.player.stamina < REST_TARGET) break;
+    if (i === 0) log('还早(' + sW.time.timeOfDay + ', 体力' + Math.round(sW.player.stamina) + '), 睡觉段等待到 21:00');
+    if (i > 60) { log('等了一小时还没到晚上(异常), 强制结束当日不睡'); return null; }
+    await sleep(60000);
+  }
   for (let attempt = 0; attempt < 3; attempt++) {
     log(JSON.stringify(await warp('FarmHouse', 9, 9)));
     // 联机(11-04): 睡前先叫醒协议——小鱼(7843 farmhand)先睡, 主持才能过全队ready-check
@@ -260,6 +278,10 @@ async function playOneDay(day) {
     }
     log('没睡成, 重试', attempt + 1);
   }
+  // ⭐睡不成绝不能留主持在床上 —— 挂着的 sleep ready-check 会把鱼鱼的换日/主线程全堵死(两次事故实锤)
+  log('3 次没睡成, cancel_sleep 把主持拔下床(防堵鱼鱼), 本日不存档');
+  await post('/cancel_sleep', {}).catch(() => { });
+  await warp('Farm', 64, 15);
   return null;
 }
 
