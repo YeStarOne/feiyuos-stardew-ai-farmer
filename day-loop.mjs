@@ -126,7 +126,7 @@ async function playOneDay(day) {
   log('木箱:', chest ? JSON.stringify(chest) : '暂无');
   {
     const s0 = await st();
-    if (s0.inventory.filter(i => i.name).length >= 10) {
+    if (s0.inventory.filter(i => i.name).length >= (s0.player.maxItems || 12) - 2) {  // 2026-11-06: 原写死10(12格包), 36格包 11格就误判满 → 钓鱼段提前收工(视频验收抓到)
       log('清晨满包, 先清仓再干活');
       await manageInventory(chest);
     }
@@ -234,11 +234,12 @@ async function playOneDay(day) {
         lastReport = report;
       }
       const slots = s.inventory.filter(i => i.name).length;
-      if (slots >= 11) {
+      const cap = s.player.maxItems || 12; // 2026-11-06: 36格联机背包别按 12 格包的阈值喊满
+      if (slots >= cap - 1) {
         await manageInventory(chest);
         const s3 = await st();
         const slots3 = s3.inventory.filter(i => i.name).length;
-        if (slots3 >= 11) {
+        if (slots3 >= cap - 1) {
           log('背包', slots3 + '/12 清不动(前台被占/没箱子), 提前收工防丢鱼');
           break;
         }
