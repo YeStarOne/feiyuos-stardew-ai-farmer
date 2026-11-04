@@ -148,7 +148,9 @@ async function clearFloor() {
     if (round % 5 === 0) {
       // 不再发/resume: 会解开锁时间作弊(2026-11-03); 失焦卡死由弹窗Esc兜底+Unstick自愈
       const mm = await get('/menu').catch(() => null); // 卡死弹窗兜底(Leave/Do类Esc可关)
-      if (mm && mm.open && mm.type === 'DialogueBox') { await post('/key', { key: 'Escape' }); log('心跳: Esc关卡死弹窗'); await sleep(600); }
+      // nofocus:true = 不调 SetForegroundWindow(2026-11-05 反编译实锤: Escape 分支只走游戏内
+      // receiveKeyPress(27), 不发 keybd_event) → 这一下不再抢用户前台
+      if (mm && mm.open && mm.type === 'DialogueBox') { await post('/key', { key: 'Escape', nofocus: true }); log('心跳: Esc关卡死弹窗(纯后台)'); await sleep(600); }
       log('清层心跳 r' + round, compactState(s));
     }
     // 自卫+主动进攻(2026-11-01 用户"挨打就要反击"): 4格内看见怪就打, 不等贴脸

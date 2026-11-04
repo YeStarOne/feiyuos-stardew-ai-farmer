@@ -439,3 +439,181 @@ curl -s localhost:7842/state | grep dayOfMonth   # 必须 +1
 - 烧锭链v1.1: craft-smelt动态/machines发现炉位(只报当前地图,先warp回家)+4邻格走位+face必发+/clock推进; smelt-session.mjs批量多炉。
 - 农舍熔炉阵(7,8)(6,9)(8,9)(5,9); 铁条4条出炉; 品质洒水器待金矿40+/精炼石英。
 - 交接手册: D:/stardew-ai-farmer/docs/小肥鱼上岗手册.md (已推YeStarOne/stardew-ai-farmer 5f60bbd)。
+
+
+## §三十三 /harvest批量收割端点+季末清田 (2026-11-04)
+- ⭐POST /harvest = 无需物理点击的批量收割(一次收割面朝格周边全部成熟作物, {"ok":true,"harvested":5}), 绕开前台互锁——收割不再依赖day-loop!
+- 季末(28日)作物全灭: 每天巡检扫/surroundings的cropPhase>=4收割一轮; 背包满先/drop垃圾(石头/蝙蝠翅膀/史莱姆)腾格。
+- 联机渔场账: 小鱼日常花共享钱包~-110g/天属正常生活消费; 卖货仍需前台空闲(openBin物理点击)。
+
+## §三十四 鱼鱼"人话助手" fish-eye (2026-11-04) 🐟
+
+**起因**: 小肥鱼在留言板连发六条抱怨（全是操作体验，不是功能缺失）：
+① 方位是 0~3 数字每次要心算 ② 周围一圈不带名字，草/石/水靠猜 ③ 移动一格一格点
+④ 没地图，记不住农场哪边是海 ⑤ 收/种只能一格一格磨 ⑥ 水壶剩水要掏出来看
+
+**结论: 不用装 mod，桥里早就有能力，缺的是翻译层。** 扒 NagiBridgeRemix DLL 的 UTF-16 字符串确认了这些现成端点：
+- `/walk_to {x,y}` —— 桥自带 BFS 寻路，一次走整段（替代 `go()` 的 8 次 `/move` 轮询）
+- `/map` —— **整图 tiles 一次给全**（模板 `ok/location/x/y/w/h/tiles/layerTiles/mapProperties`），
+  不用再靠走路一格一格试；`/surroundings` 每格带 `object/objId/isStone/isWeeds/isTwig/terrain/
+  resource/crop{cropName,cropPhase}/watered/harvestable/water_fishable` 全套字段
+- `/tool_area {ops:"water"|"till", x1,y1,x2,y2}` —— **批量浇/锄**（比逐格 `/use` 快一个数量级）
+- `/harvest` —— HTTP 批量收割，零物理点击 → 绕开前台互锁
+- `/state.inventory[].waterLeft` —— 水壶剩水本来就在 state 里
+
+**实现（两个新文件）**:
+| 文件 | 职责 |
+|---|---|
+| `D:/StardewAI/fish-eye-lib.mjs` | 纯函数翻译层：方位词/格子名/文字地图/水壶/地标/指令解析/待办 |
+| `D:/StardewAI/fish-eye.mjs` | :7851 HTTP 服务，`/say?cmd=看看` 一句话入口 + 动作端点 |
+
+**关键设计**:
+1. **地标按人分岔**：同一个"家"，`who:'fish'` → `Cabin(4,9)`，`who:'host'` → `FarmHouse(9,9)`。
+   上次她跑错屋就是因为只有一份地标表。`findLandmark(word, who)` 先查自己那份再回退公共。
+2. **整图预热**：首次进一张图就调 `/map` 把全图并进 `seenCache`（落盘 `fish-eye-seen.json`），
+   之后越走越全。`/map` 不可用时自动退回走路记图，不阻塞。
+3. **批量优先、逐格兜底**：浇水/锄地先发 `/tool_area`，回查 `watered/terrain` 验收；不达标再逐格 `/use`。
+4. **宁可说没走到，不骗她**：`/walk_to` 后必须回读 `/state` 校验距离，不满足就明说"没走到"。
+5. **安全**：只做 收/浇/锄/种/走/打水；**绝不卖货、绝不整理背包、绝不物理点击**（不触发前台互锁）。
+6. **打水两级**：站水格旁 `/use` 灌满 → 不成就退桥自己的 `/refill` → 还不行就告诉她该去哪。
+
+**验收（全程无游戏，先验后上线）**:
+- `node test/fish-eye.test.mjs` —— 12 项纯逻辑（方位/格子/地图/水壶/地标分岔/指令/待办）
+- `node test/fish-eye.e2e.mjs` —— 起 mock 桥(9143)+fish-eye(9151)，真发 HTTP 走 16 项
+  （看看/地图/世界/水壶/该干嘛/收菜/浇水/打水/去田边/去火星/种蓝莓/胡说一句/POST 端点/selftest）→ **全绿**
+- 上线后实况（游戏关着）：`/help` 正常、`/selftest` 明确报"桥 7843 不通"、`/say?cmd=看看` 报"读不到游戏状态"
+
+**接入**:
+- 本机 `:7851`；Tailscale 中继 `100.98.120.55:17851 → 7851`（`remote-proxy.py` MAP 已加）
+- 目标角色默认 fish(7843)，可用 `FISHEYE_TARGET=host` 或 `FISHEYE_BASE` 覆盖
+- 管家 `fish-concierge.mjs` 已加关键词（不方便/一格一格/没地图/...）自动指路到 fish-eye
+- 说明书给鱼鱼：`D:/StardewAI/攻略库/00_必读开局/guide-fish-eye-人话助手.md`
+
+**教训沉淀**: 玩家抱怨"不方便"≠需要新功能。先把现有 API 全列出来（`endpoints.md` 177 个），
+检查有没有 `⭐` 标记但一直没用的，往往翻译层就够了 —— 这次 0 行 mod 代码解决 6 条抱怨。
+
+## §三十五 ⭐⭐反编译 NagiBridgeRemix 全量审计 (2026-11-04)
+
+**方法升级：不再靠扒字符串猜端点语义，改用 `ilspycmd` 完整反编译（34,481 行 C#）。**
+```bash
+ilspycmd "G:\量化系统安装包\V1.6.15\Mods\NagiBridgeRemix\NagiBridgeRemix.dll" -o D:/StardewAI/dll-audit
+```
+产出 `NagiBridgeRemix.decompiled.cs` + `handlers_full.tsv`(174 handler 入参/输出字段/中文提示) + 端点使用差异表。
+
+**结果：174 个端点，我们只用了 44 个。剩下 130 个里有 9 个能直接消灭已踩过的坑。**
+
+### P0 —— 直接消灭历史事故
+
+**① `/sell` = 卖货不需要物理点击（前台互锁彻底作废）**
+```csharp
+Farm farm = currentLocation as Farm;
+IInventory bin = farm?.getShippingBin(player);   // 只对 Farm 有效
+bin.Add(item);  player.Items[i] = null;          // 直接塞出货箱，零点击
+→ { ok, sold:[{item,count,price}], totalItems }
+```
+- 我们卡了最久的问题（连续多日"卖货等前台空闲"）根源是**以为只能靠出货箱 UI**。
+- **必须逐个按名字投**；`all:true` 在源码里是 `sellAll` 分支**跳过名字过滤**，会把包里除种子/工具/任务品外全部塞进去 → **永久禁用**。
+- 落地：`lib.mjs` 新增 `sellByName(name,count)` / `sellAllWhitelisted()`，走 `isSellable` 白名单 + `QUEST_RESERVE` 保护。旧 `openBin()` 退休。
+
+**② `/cancel_sleep` = 赖床死循环一行破解**
+```csharp
+player.isInBed.Value = false;
+if (activeClickableMenu is ReadyCheckDialog rc) rc.exitThisMenu(true);
+Game1.activeClickableMenu = null;
+Game1.dialogueUp = false;
+```
+正是"春2一晚跳夏2、31 株作物全灭"事故里我们**手工拼的四步**（menu_close x2 + warp 下床 + 关对话框）。现在原子化。
+配套 `/ready_state` 读 `NumberReady/NumberRequired/State/ActiveLockId/ReadyStates` → 卡 1/2 时立刻知道谁没 ready。
+落地：`host-night-guard v2` 检测"两人都在床 + 天数不动超 4 分钟"→ 自动 `cancel_sleep` 双端 + 兜底 menu_close + warp 下床。
+
+### P1 —— 终结误报与季末止损
+
+**③ `/farm_report` 扫全农场（不只当前地图）**
+```
+crops: { total, watered, ready, byLocation }   animals: {total, animals[]}   machines: {total, machines[]}
+```
+我们之前 `waterAll` 只扫半径 10-12，才会把"没扫到"误判成"没浇水"（当时还怀疑桥没 `watered` 字段）。一次调用拿全田账。
+
+**④ `/ripen?radius=30` 强制催熟**
+`crop.growCompletely()` —— 季末最后一天不用赌"今晚会不会熟"。流程：`/ripen` → `/harvest` → `/sleep` 存档锁住。
+
+**⑤ `/clear_ground?x=&y=` 直接删格上杂物**
+从 `location.debris` / `objects` / `terrainFeatures` 三处直接 Remove。不用镰刀/工具/走路/蓄力，纯 HTTP（行为学框选要求窗口在前台）。
+⚠️ 它连 objects（含宝箱/机器）和 terrainFeatures（含作物）一起删 —— **只能对已核实的杂草/石头/树枝格调用**，调前必须 `/dump_tile` 或 `/surroundings` 核对。
+
+**⑥ `/tool_area` 参数名是 `operation` 不是 `ops`**（我此前写错，fish-eye 批量浇水一直没生效）
+且源码会自动切工具（`CurrentToolIndex`）、按 `UpgradeLevel` 换算蓄力范围 —— 不需要我们先 `/select`。
+
+### P2 —— 效率提升
+- `/scan_chests`：一次列所有箱子坐标+内容+空格数（我们原靠 `/surroundings` 正则匹配视野内）
+- `/chest_take_list {items:[{name,count}]}`：按名字批量取，带 `reachTiles`/`tooFar`
+- `/sprinklers`：`{x,y,type:iridium|quality|basic}`（`plant-spring.mjs` 里硬编码的 7 个坐标可以删）
+- `/machine_reqs` + `/machine_load`：熔炉/腌罐"缺什么料→自动投→收成品"闭环
+
+### 永久禁用
+| 端点 | 原因 |
+|---|---|
+| `/money {amount}` | `player.Money += amount` 直接改钱，经济系统彻底失真，与"自己种田赚钱"目标冲突 |
+| `/sell {all:true}` | 跳过白名单过滤 |
+| `/clear_ground` 对含作物/箱子/机器的格 | 会连作物一起删 |
+
+### 方法学教训（写进规矩）
+**遇到"这个端点不确定行为"，第一反应是 `ilspycmd` 反编译，不是写试探脚本。** 反编译一次 30 秒，试探一次可能烧掉一个游戏日。
+这次四个认知错误全靠反编译纠正：`/sell` 其实最安全、`/tool_area` 参数写错、`/cancel_sleep` 一个端点顶四步、`/farm_report` 扫全图。
+
+**验收**：13 项单测 + 19 项 fish-eye e2e + 8 项无点击卖货 e2e，全部离线可跑（mock 桥），全绿。
+
+## 三十六、前后台边界定案(2026-11-05): 日常动作链 100% 纯后台
+
+> ilspycmd 把 173 个端点逐个核对了输入机制(不是猜的, 每条都有源码行号)。结论分三档, 写进 lib.mjs 头注释⑨。
+
+### 1. 三档分类
+
+| 档 | 数量 | 机制 | 对用户的影响 |
+|---|---|---|---|
+| A. 纯 HTTP | 161 | EnqueueMainThread → OnUpdateTicked 里执行, 与焦点无关 | 完全不碰 |
+| B. 游戏内模拟点击 | 7 | 直接调 menu.receiveLeftClick(x,y), 不经过 Windows 输入层 | 不碰; 但要求菜单已开着(/menu/click /gift /menu/number /minigame_click /sell_to_shop /settlement_confirm /tailor_set) |
+| C/D. 碰真鼠标/抢前台 | **5** | SetForegroundWindow / SetCursorPos / mouse_event / keybd_event | 抢焦点、挪用户鼠标 |
+
+C/D 档就 5 个: **/click_tile /drag /focus** 永远抢前台+动真鼠标; **/click** 有菜单时是 B 档, 菜单关着时 fallback 到"鼠标移屏幕中心真左键"; **/key** 默认抢前台。
+
+### 2. 两个后台能跑的前提(都已满足)
+
+- `startup_preferences` 里 `pauseWhenOutOfFocus=false`;
+- NagiBridge 的 Harmony 补丁把 `Game.IsActive` getter 强制返回 true(两条 SMAPI 日志都打了"补丁已应用")。
+→ 游戏失焦照常 tick, 纯 HTTP 动作照常执行。**推断但未实测**: BehaviorAutomation 的 Tick 也读 IsActive,
+理论上框选作业同样吃这个补丁红利(等游戏开着时验证一次)。
+
+### 3. /key 的分支细则(重要)
+
+- `escape` / `ok` / `menu` / `cancel` / `confirm`(非小游戏) 分支: 纯游戏内(receiveKeyPress/receiveLeftClick), **不发 keybd_event** → 加 `nofocus:true` 即完全后台;
+- `down` / 字母 / 数字 / F1-12 / space 分支: `keybd_event` 是**真键盘**, 打进当时的前台窗口 → ⚠️用户在用电脑时绝对禁发;
+- `mine-session.mjs` 心跳 Esc 已加 `nofocus:true`(2026-11-05)。
+
+### 4. 两个认知纠错(反编译抓出来的)
+
+**① /harvest 本来就能收草莓/蓝莓, 我们当年判错了。**
+Crop.harvest 结尾: 复生作物(RegrowDays>0)收完产物后返回 **false**(一次性作物才返回 true)。
+桥的 HandleHarvest 把这个返回值当条件: `if(... && crop.harvest(...)) { destroyCrop; num++ }`
+→ 复生作物: 产物进包、植株保留(正确!), 但 harvested 计数不加。
+当年看到 0 就断定"/harvest 收不掉草莓", 于是做了整套物理右键 harvestCrops —— **前提是错的, 已退休**。
+**教训: 判断收割成功只认背包快照差分, 绝不信 harvested 数字。**
+
+**② 多产作物的多余产物会掉在地上。**
+`createItemDebris` 只在玩家 64px 内自动拾取(Debris.Update), /harvest 的 radius 是 15-50,
+站在一头收整片田 → 多出来的果实躺在田那头。**收完必须 sweepDebris 走过去捡**,
+且只捡 `droppedBy===0` 的(自家收菜掉落), 玩家丢的(鱼鱼/主持)绝不碰。
+
+### 5. 本轮代码改动(全部离线 e2e 验证)
+
+| 文件 | 改动 |
+|---|---|
+| lib.mjs | 头注释⑨前后台边界; BASE 可 env 覆盖(离线测试用); `openBin()`/`harvestCrops()` 标退休(保留兼容); 新增 `harvestAll()`+`sweepDebris()`+`invDelta()`; `sellAndStore` 卖货段改走 `sellAllWhitelisted()`, openBin 只剩兜底(且兜底单独入账防重复计数) |
+| lib-fish.mjs | 同步全套(补 sellByName/sellAllWhitelisted/harvestAll/sweepDebris/invDelta, 卖货段同改) |
+| mine-session.mjs | 心跳 Esc 加 `nofocus:true` |
+| day-loop.mjs | `harvestCrops(6)` → `harvestAll(15,8,true)`, 日志改报"实际入包/桥计数/补捡"三数 |
+| test/mock-bridge.mjs | /harvest 按真桥语义分一次性/复生; 新增 /debris(掉落+走近自动拾取)+/__calls 回放 |
+| test/background-no-click.e2e.mjs | 新增: 断言复生作物收得到+计数不骗人+掉落补捡+白名单边界+**全程 0 个物理点击端点** |
+
+**验收**: 新 e2e 6 组断言 + 既有 13 单测/19 e2e/8 无点击卖货 e2e 全绿。
+此后 `day-loop` 一整天的动作链里没有任何一行会碰用户的鼠标; 物理点击只剩"兜底老路"和一次性考古脚本。

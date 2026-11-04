@@ -7,8 +7,8 @@
 import fs from 'node:fs';
 import {
   st, warp, sel, useOn, waterAll, log, invCount, sleep, post, get, surr,
-  fishbotSet, openBin, foregroundIsStardew,
-  isSellable, shouldStore, harvestCrops, sellAndStore,
+  fishbotSet, foregroundIsStardew,
+  isSellable, shouldStore, harvestAll, sellAndStore,
   findChest, storeToChest, craftChest, placeChestNearHouse,
   chopWood, expandField,
   compactState, ledInc, ledSnapshot, memAdd, memList, regionConfig
@@ -148,11 +148,16 @@ async function playOneDay(day) {
   }
   // 1. 农活
   log(JSON.stringify(await warp('Farm', 65, 21)));
+  // 2026-11-05 收菜合并为 harvestAll: /harvest 本来就能收复生作物(草莓/蓝莓), 只信背包差分不信计数,
+  // 收完自动扫 /debris 把多产的掉落走过去捡掉 —— 整段零点击零前台
   {
-    const h = await post('/harvest', {}).catch(() => null);
-    if (h?.harvested) log('一键收获', h.harvested, '株');
+    const h = await harvestAll(15, 8, true).catch(e => { log('harvestAll 异常:', String(e).slice(0, 90)); return null; });
+    if (h) {
+      log('收菜完成: 实际入包', h.gained, '件', (h.items || []).map(([n, c]) => `${n}x${c}`).join(',') || '(空)',
+        '| 桥计数', h.harvested, '| 补捡掉落', h.picked, '件');
+      if (h.gained) ledInc('cropsHarvested', h.gained, 'harvestAll 入包差分');
+    }
   }
-  await harvestCrops(6); // /harvest 收不掉的(草莓类)逐株右键(有前台互锁)
   await checkMail();
   await waterAll(14);
   await replantAll();
@@ -234,6 +239,9 @@ async function playOneDay(day) {
   await manageInventory(chest, true);
   for (let attempt = 0; attempt < 3; attempt++) {
     log(JSON.stringify(await warp('FarmHouse', 9, 9)));
+    // 联机(11-04): 睡前先叫醒协议——小鱼(7843 farmhand)先睡, 主持才能过全队ready-check
+    try { await fetch('http://localhost:7843/sleep', { method: 'POST' }); log('已通知小鱼先睡'); } catch { }
+    await sleep(6000);
     const r = await post('/sleep', {}).catch(e => ({ error: String(e) }));
     log('sleep:', JSON.stringify(r).slice(0, 150));
     for (let i = 0; i < 12; i++) {
@@ -252,7 +260,7 @@ async function playOneDay(day) {
 // ===== 主流程 =====
 let s0;
 try { s0 = await st(); } catch { console.log('游戏没在跑, 退出'); process.exit(0); }
-log('== Day' + s0.time.dayOfMonth, s0.time.timeOfDay, '钱', s0.player.money, '| 前台是星露谷?', await foregroundIsStardew());
+log('== Day' + s0.time.dayOfMonth, s0.time.timeOfDay, '钱', s0.player.money, '| 前台是星露谷?', await st().then(() => foregroundIsStardew()).catch(() => false));
 
 const MAX_DAYS = 3;
 let day = s0.time.dayOfMonth;

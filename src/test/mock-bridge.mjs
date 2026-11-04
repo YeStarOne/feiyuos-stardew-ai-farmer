@@ -11,12 +11,13 @@ function mkWorld() {
   for (let y = 15; y <= 24; y++) for (let x = 55; x <= 74; x++) put(x, y);
   // 田: x 62..68, y 19..21 锄过
   for (let y = 19; y <= 21; y++) for (let x = 62; x <= 68; x++) put(x, y, { terrain: 'HoeDirt', watered: true });
-  // 作物
-  put(63, 19, { terrain: 'HoeDirt', watered: true, crop: true, cropName: 'Blueberry', cropPhase: 4, harvestable: true });
-  put(64, 19, { terrain: 'HoeDirt', watered: true, crop: true, cropName: 'Blueberry', cropPhase: 4, harvestable: true });
-  put(65, 19, { terrain: 'HoeDirt', watered: true, crop: true, cropName: 'Blueberry', cropPhase: 4, harvestable: true });
-  put(66, 19, { terrain: 'HoeDirt', watered: true, crop: true, cropName: 'Hot Pepper', cropPhase: 2, harvestable: false });
-  put(67, 19, { terrain: 'HoeDirt', watered: false, crop: true, cropName: 'Hot Pepper', cropPhase: 2, harvestable: false });
+  // 作物 (cropRegrow>0 = 复生作物; 真桥语义: /harvest 对它们返回计数不含、且不销毁)
+  put(63, 19, { terrain: 'HoeDirt', watered: true, crop: true, cropName: 'Blueberry', cropPhase: 4, harvestable: true, cropRegrow: 4 });
+  put(64, 19, { terrain: 'HoeDirt', watered: true, crop: true, cropName: 'Blueberry', cropPhase: 4, harvestable: true, cropRegrow: 4 });
+  put(65, 19, { terrain: 'HoeDirt', watered: true, crop: true, cropName: 'Blueberry', cropPhase: 4, harvestable: true, cropRegrow: 4 });
+  put(66, 19, { terrain: 'HoeDirt', watered: true, crop: true, cropName: 'Hot Pepper', cropPhase: 2, harvestable: false, cropRegrow: 3 });
+  put(67, 19, { terrain: 'HoeDirt', watered: false, crop: true, cropName: 'Hot Pepper', cropPhase: 2, harvestable: false, cropRegrow: 3 });
+  put(64, 21, { terrain: 'HoeDirt', watered: true, crop: true, cropName: 'Melon', cropPhase: 4, harvestable: true }); // 一次性作物
   // 水塘
   for (let x = 70; x <= 72; x++) for (let y = 22; y <= 24; y++) put(x, y, { terrain: 'Water', water_fishable: true, passable: false });
   return tiles;
@@ -39,6 +40,8 @@ const state = {
   heldItem: { name: 'Blueberry Seeds' }, activeMenu: null,
 };
 const calls = [];
+// 地上掉落(真桥 /debris 的形状): {x,y,itemName,stack,droppedBy}; droppedBy=0 = 没有归属玩家
+const debris = [];
 
 function surroundings(radius) {
   const p = state.player;
@@ -55,6 +58,14 @@ function walkTo(x, y) {
   if (!t.passable) return { ok: false, error: `(${x},${y}) 站不住` };
   state.player.x = x; state.player.y = y;
   state.time.timeOfDay = Math.min(2550, state.time.timeOfDay + 10);
+  // 真桥 Debris.Update: 玩家站位 64px 内的掉落自动 collect
+  for (let i = debris.length - 1; i >= 0; i--) {
+    const d = debris[i];
+    if (Math.abs(d.x - x) <= 1 && Math.abs(d.y - y) <= 1) {
+      addItem(d.itemName, d.stack);
+      debris.splice(i, 1);
+    }
+  }
   return { ok: true, walk_started: true, arrived: { x, y } };
 }
 const pick = (name) => state.inventory.find((i) => i.name === name);
@@ -78,21 +89,31 @@ const routes = {
   '/select': (b) => { state.heldItem = { name: b.name }; const it = pick(b.name); return it ? { ok: true, selected: b.name } : { ok: false, error: `Item '${b.name}' not found` }; },
   '/face': (b) => ({ ok: true, facing: b.direction }),
   '/walk_to': (b) => walkTo(Number(b.x), Number(b.y)),
+  '/move': (b) => walkTo(Number(b.x), Number(b.y)),
   '/warp': (b) => { state.location = { name: b.location }; state.player.x = Number(b.x); state.player.y = Number(b.y); return { ok: true }; },
   '/menu_close': () => { state.activeMenu = null; return { ok: true }; },
+  // 真桥语义(HandleHarvest): 一次性作物 → 1进包+(num4-1)掉地上+清格+计数;
+  // 复生作物 → 1进包+多余掉地上+保留植株+**计数不加**(Crop.harvest 返回 false)。
+  // 注意只认 harvestable 标志 —— 真桥按 readyForHarvest(游戏对象内部态)判定, 不看 cropPhase
   '/harvest': () => {
-    const p = state.player;
     let n = 0;
     for (const t of surroundings(2)) {
-      if (t.crop && (t.harvestable === true || t.cropPhase >= 4)) {
-        n++;
-        addItem(t.cropName, 3);
+      if (!t.crop || t.harvestable !== true) continue;
+      addItem(t.cropName, 1);
+      debris.push({ x: t.x, y: t.y, itemName: t.cropName, stack: 2, droppedBy: 0 }); // 多产掉落
+      if (t.cropRegrow > 0) {
+        t.harvestable = false;          // 保留植株, 进复生期
+      } else {
         t.crop = false; t.cropName = null; t.harvestable = false; t.cropPhase = 0;
+        n++;                            // 只有一次性的才计数
       }
     }
-    void p;
     return { ok: true, harvested: n };
   },
+  // 真桥 HandleDebris: 只读列出当前地图的地上掉落
+  '/debris': () => ({ ok: true, location: state.location.name, debris: debris.map(d => ({ ...d })) }),
+  // 测试辅助: 回放全部请求(验证"零物理点击"用)
+  '/__calls': () => ({ ok: true, calls: [...calls] }),
   // 真桥: GetParam<string>(p,"operation"), 只认 water|till; 不认 ops(b.ops 会被当 undefined 拒掉)
   '/tool_area': (b) => {
     if (!['water', 'till'].includes(b.operation)) {
@@ -203,4 +224,4 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => console.log('mock bridge on ' + PORT));
-export { state, world, calls };
+export { state, world, calls, debris };

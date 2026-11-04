@@ -2,12 +2,19 @@
 // v2 变更(2026-10-28):
 //   ① 卖出白名单政策(用户拍板): 只卖 鱼+农作物+垃圾, 其余绝不卖 → 存木箱或留背包
 //      (教训: 曾按黑名单 KEEP 卖掉 Deluxe Bait / Sonar Bobber)
-//   ② 物理点击前台互锁: 用户可能在同一台电脑玩别的游戏, openBin/harvestCrops 前先确认
-//      前台进程是 Stardew, 否则拒绝点击(fg-name.ps1)
-//   ③ 通用右键收割 harvestCrops(/harvest 收不掉的作物如草莓)
+//   ② 物理点击前台互锁: 用户可能在同一台电脑玩别的游戏, 物理点击前先确认前台是 Stardew(fg-name.ps1)
+//      ⚠️2026-11-05 起日常动作链已 100% 纯后台: openBin/harvestCrops 两条物理右键路退休(见⑨),
+//      互锁只对"兜底老路"生效 —— 新代码禁止再引入物理点击
+//   ③ (退休) 通用右键收割 harvestCrops —— 它的前提是错的: /harvest 本来就能收草莓/蓝莓,
+//      只是桥把复生作物的 harvest() 返回值当 false → harvested 计数不含它们(见⑨/harvestAll 注释)
 //   ④ 木箱: findChest / storeToChest / craftChest / placeChestNearHouse
 //   ⑤ 移植验证过的 chopWood(砍树) / tillTiles+expandField(翻地扩田)
-const BASE = 'http://localhost:7843';
+//   ⑨ 前后台边界(2026-11-05 ilspycmd 反编译, 173 端点逐一核对, 与 lib.mjs 同一份结论):
+//      碰真鼠标/抢前台只有 5 端点(/click_tile /drag /focus /click /key);
+//      /key 的 escape/confirm(非小游戏)分支加 nofocus:true 即纯后台,
+//      down/字母/数字/F1-12 分支 keybd_event 是真键盘 → 用户在用电脑时绝对禁发。
+//      后台能跑的基础设施: pauseWhenOutOfFocus=false + NagiBridge 把 Game.IsActive 补丁成恒 true。
+const BASE = process.env.STARDEW_BASE_FISH || 'http://localhost:7843';
 import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 
@@ -17,7 +24,7 @@ export const get = async (p) => (await fetch(BASE + p)).json();
 // 每个副作用动作都落 D:/StardewAI/action-journal.jsonl: {t,id,endpoint,body,result}
 // 用途: loop 重启后对账"刚才那个动作到底成没成"—— 结果未知≠成功(对齐 star 铁律)
 // STARDEW_JOURNAL=0 可关
-const JOURNAL_PATH = 'D:/StardewAI/action-journal.jsonl';
+const JOURNAL_PATH = process.env.STARDEW_JOURNAL_PATH || 'D:/StardewAI/action-journal.jsonl';
 const JOURNAL_ON = process.env.STARDEW_JOURNAL !== '0';
 let journalSeq = 0;
 function jour(endpoint, body, result) {
@@ -203,8 +210,15 @@ export function snapshotGain(a, b) {
   for (const k in b) if ((b[k] ?? 0) > (a[k] ?? 0)) n += b[k] - (a[k] ?? 0);
   return n;
 }
+// b 相对 a 的逐物品增量 [[name, delta], ...] (只报增加; 收菜/补捡的"到底收到了啥"靠它)
+export function invDelta(a, b) {
+  const out = [];
+  for (const k in b) { const d = (b[k] ?? 0) - (a[k] ?? 0); if (d > 0) out.push([k, d]); }
+  return out;
+}
 
-// 开杂货箱（物理右键, 内含前台互锁），返回是否成功打开 ItemGrabMenu
+// 【已退休 2026-11-05】开杂货箱物理右键 —— 被 /sell 整套取代(见下方 sellByName 注释)。
+// 保留只为旧脚本兼容; 卖货一律 sellAllWhitelisted, 别再调这个(它抢前台+动真鼠标)。
 // 杂货箱在 Farm (72,14); /store 对它无效, 只能走 UI
 export async function openBin() {
   if (!(await foregroundIsStardew())) {
@@ -235,8 +249,10 @@ export async function openBin() {
   return s.activeMenu?.type === 'ItemGrabMenu';
 }
 
-// ================= 通用右键收割 =================
-// /harvest 收不掉的作物(草莓类)逐株收: 站四邻 → click_tile 拿绝对坐标 → 物理右键 → 快照差分验证
+// ================= (退休)右键收割 =================
+// ⚠️2026-11-05 结论: 它的前提是错的 —— /harvest 本来就能收草莓/蓝莓这类复生作物,
+// 当年只是被 harvested:0 骗了(Crop.harvest 对复生作物返回 false, 见 harvestAll 注释)。
+// 这个物理逐株版保留兼容, 新代码一律 harvestAll()。
 export async function harvestCrops(maxWaves = 6, slotLimit = 11) {
   if (!(await foregroundIsStardew())) {
     log('!! 前台不是星露谷, 跳过右键收割');
@@ -286,6 +302,75 @@ export async function harvestCrops(maxWaves = 6, slotLimit = 11) {
   }
   log('== 右键收割共', total, '==');
   return total;
+}
+
+// ================= 全 HTTP 收割 (2026-11-05 反编译实锤, 替代右键逐株) =================
+// 源码证据(HandleHarvest → Crop.harvest):
+//   对半径内所有 readyForHarvest 的作物直接调 crop.harvest(), 不走路不点击。
+//   一次性作物(防风草/甜瓜...) → 收进背包 + 清格, 返回 true;
+//   复生作物(草莓/蓝莓/番茄/辣椒/玉米) → 收进背包 + 设复生日, 但返回 **false**
+//   → 桥的 harvested 计数**不含复生作物**! 判断成功只认背包快照差分, 绝不信 harvested 数字。
+//   背包满时 addItemToInventoryBool 失败 → 那格整格不收(产物不损), 先清包再来。
+// 多产作物(蓝莓等)超出背包那 1 个的会 createItemDebris 掉在地上, 只有玩家在 64px 内才自动拾取
+//   → 收完必须 sweepDebris 走过去捡, 否则等于白收一半。
+// 半径: /harvest?radius=N 上限 50(默认15); /surroundings?radius 上限 30。
+// 返回 { gained, items, rounds, harvested, picked }
+export async function harvestAll(radius = 15, maxRounds = 8, sweep = true) {
+  const R = Math.max(1, Math.min(Number(radius) || 15, 50));
+  const base = invSnapshot(await st());   // 总基线: 最终 items/gained 全按它算差分
+  let prev = base;
+  let rounds = 0, harvested = 0;
+  for (let round = 0; round < maxRounds; round++) {
+    const s = await st();
+    if (s.activeMenu && !/BobberBar/i.test(s.activeMenu.type || '')) {
+      await post('/menu_close', {}); await sleep(400);
+    }
+    const slots = (s.inventory || []).filter(i => i.name).length;
+    if (slots >= 12) { log('背包满, 停手 —— 先清仓/存箱再来收'); break; }
+    const r = await post(`/harvest?radius=${R}`, {}).catch(e => ({ error: String(e) }));
+    if (r?.error) { log('/harvest 失败:', String(r.error).slice(0, 90)); break; }
+    harvested += Number(r?.harvested ?? 0);
+    await sleep(700);            // 掉落物/拾取要等游戏 tick 跑一下
+    const cur = invSnapshot(await st());
+    const gain = snapshotGain(prev, cur);
+    rounds++;
+    if (gain) log(`收 wave${round}: harvested计数=${r?.harvested ?? 0} 实际入包=${gain}`);
+    if (!gain) break;            // 这一轮包里啥都没进 → 周围没有熟的了
+    prev = cur;
+  }
+  const picked = sweep ? await sweepDebris() : 0;
+  const after = invSnapshot(await st());
+  return { gained: snapshotGain(base, after), items: invDelta(base, after), rounds, harvested, picked };
+}
+
+// 扫 /debris 把地上没人认领的掉落走过去捡掉(纯 HTTP 走位, 零点击)
+// 只捡 droppedBy===0 的(自家收菜/系统掉落); 玩家丢的(鱼鱼/主持)绝不碰 —— 那是人家的东西
+// 返回捡到的总件数
+export async function sweepDebris(maxVisits = 40) {
+  let picked = 0, visits = 0;
+  const stuck = new Set();
+  const owned = (list) => list.filter(x => Number(x.droppedBy ?? 0) === 0 && !stuck.has(`${x.x},${x.y}`));
+  while (visits < maxVisits) {
+    const d = await get('/debris').catch(() => null);
+    const list = owned(d?.debris || []);
+    if (!list.length) break;
+    const t = list[0];
+    visits++;
+    const before = invSnapshot(await st());
+    let stood = await go(t.x, t.y);
+    if (!stood) for (const [cx, cy] of [[t.x, t.y + 1], [t.x, t.y - 1], [t.x + 1, t.y], [t.x - 1, t.y]]) {
+      if (await go(cx, cy)) { stood = true; break; }
+    }
+    if (!stood) { stuck.add(`${t.x},${t.y}`); continue; }
+    await sleep(700);            // Debris.Update 在玩家 64px 内才 collect
+    const gain = snapshotGain(before, invSnapshot(await st()));
+    const d2 = await get('/debris').catch(() => null);
+    const still = (d2?.debris || []).some(x => x.x === t.x && x.y === t.y && Number(x.droppedBy ?? 0) === 0);
+    if (gain) picked += gain;
+    if (!gain && still) stuck.add(`${t.x},${t.y}`);   // 走到了也没触发 → 这格卡住, 跳过
+  }
+  if (visits) log(`扫地上掉落: 走了 ${visits} 格, 捡回 ${picked} 件`);
+  return picked;
 }
 
 // ================= 木箱 =================
@@ -504,37 +589,95 @@ export async function sellAndStore(chest, force = false) {
       else break;
     }
   }
+  // 2026-11-05 改无点击: openBin 物理右键整套退休(源码实锤 /sell 直接塞出货箱, 零点击零前台)。
+  // 注意: sellAllWhitelisted 返回的是"件数"(按 stack 计), 且内部已入账 itemsSold —— 这里不重复 ledInc。
   let sold = 0;
-  // 外层 pass: 一轮只投出一条是已知现象(用户 10-30 抓现行: 两条鱼只卖一条), 有剩余就重开箱子再来
-  for (let pass = 0; pass < 6; pass++) {
-    const left = (await st()).inventory.filter(i => i.name && isSellable(i.name) && !QUEST_RESERVE[i.name]).length;
-    if (!left) break;
-    const opened = await openBin(); // 内含前台互锁
-    if (!opened) { log('杂货箱没开成(前台被占/残留菜单), 存箱已完成', stored, '件, 卖货稍后再试'); return stored; }
-    for (let round = 0; round < 25; round++) {
-      s = await st();
-      if (s.activeMenu?.type !== 'ItemGrabMenu') break;
-      const item = s.inventory.find(i => i.name && isSellable(i.name));
-      if (!item) break;
-      // 必须用 item 自己的 slotIndex(inventory 数组会跳过空格, 数组下标≠格子)
-      const idx = item.slotIndex ?? s.inventory.findIndex(i => i.name === item.name);
-      const x = 265 + (idx % 12) * 65, y = idx < 12 ? 478 : 545;
-      await post('/menu/click', { x, y }).catch(() => null);
-      await sleep(800);
-      s = await st();
-      if (!s.inventory.some(z => z.name === item.name)) { sold++; log('投放', item.name); }
-      else { log('投放失败', item.name); break; }
-      if (s.activeMenu?.type !== 'ItemGrabMenu') break;
+  try { sold = await sellAllWhitelisted(true); }
+  catch (e) { log('无点击卖货异常:', String(e).slice(0, 80)); }
+  // 兜底老路: /sell 没清干净才回物理右键(理论上不该走到 —— 走到说明桥太旧/没在 Farm)。
+  // ⚠️这条路抢前台+动真鼠标, 有前台互锁; 走到它本身就说明该修桥而不是修脚本。
+  if ((await st()).inventory.some(i => i.name && isSellable(i.name) && !QUEST_RESERVE[i.name])) {
+    log('!! /sell 后包里仍有可卖物品 → 回退 openBin 老路(需要前台, 仅兜底)');
+    let fallbackSold = 0;
+    for (let pass = 0; pass < 6; pass++) {
+      const left = (await st()).inventory.filter(i => i.name && isSellable(i.name) && !QUEST_RESERVE[i.name]).length;
+      if (!left) break;
+      const opened = await openBin(); // 内含前台互锁
+      if (!opened) { log('杂货箱没开成(前台被占/残留菜单), 存箱已完成', stored, '件, 卖货稍后再试'); break; }
+      for (let round = 0; round < 25; round++) {
+        s = await st();
+        if (s.activeMenu?.type !== 'ItemGrabMenu') break;
+        const item = s.inventory.find(i => i.name && isSellable(i.name));
+        if (!item) break;
+        // 必须用 item 自己的 slotIndex(inventory 数组会跳过空格, 数组下标≠格子)
+        const idx = item.slotIndex ?? s.inventory.findIndex(i => i.name === item.name);
+        const x = 265 + (idx % 12) * 65, y = idx < 12 ? 478 : 545;
+        await post('/menu/click', { x, y }).catch(() => null);
+        await sleep(800);
+        s = await st();
+        if (!s.inventory.some(z => z.name === item.name)) { fallbackSold++; log('投放', item.name); }
+        else { log('投放失败', item.name); break; }
+        if (s.activeMenu?.type !== 'ItemGrabMenu') break;
+      }
+      await post('/menu_close', {}); await sleep(500);
+      await post('/menu_close', {}); await sleep(300);
     }
-    await post('/menu_close', {}); await sleep(500);
-    await post('/menu_close', {}); await sleep(300);
+    if (fallbackSold) { ledInc('itemsSold', fallbackSold, '清仓卖出(老路兜底)'); sold += fallbackSold; }
   }
-  // (存箱已前置到 openBin 之前, 这里只管卖)
+  // (存箱已前置到 openBin 之前, 这里只管卖; itemsSold 由 sellAllWhitelisted/兜底各自入账)
   s = await st();
   log('清仓', sold, '件 存箱', stored, '件 | 钱', s.player.money, '| 格子', s.inventory.filter(i => i.name).length + '/12');
-  if (sold) ledInc('itemsSold', sold, '清仓卖出');
   if (stored) ledInc('itemsStored', stored, '存木箱');
   return sold;
+}
+
+// ================= 无点击卖货 (2026-11-04 ilspycmd 反编译实锤) =================
+// 源码证据(HandleSell): farm.getShippingBin(player).Add(item) —— 直接把物品塞进出货箱,
+// 零物理点击、零 UI、零前台依赖; 下次睡觉结算照常变成钱。
+// ⚠️ 必须逐个按名字投; 绝不能传 all:true(源码里 sellAll 分支跳过名字过滤 = 卖光非种子非工具非任务品)
+// ⚠️ 必须在 Farm 地图(源码: getShippingBin 只对 Farm 有效, 否则 "No shipping bin found")
+// ⚠️ 桥不认 count 参数(源码只读 name/all)→ 每次都是整叠投, 别指望部分卖出
+// 返回 { ok, sold:[{item,count,price}], totalItems }
+export async function sellByName(name, count) {
+  const body = count ? { name, count } : { name };
+  return post('/sell', body);
+}
+
+// 把所有 isSellable(且不在 QUEST_RESERVE) 的整叠逐个投进出货箱, 不依赖前台
+// 与旧 openBin 的区别: 无物理右键 → 用户在用电脑时也能卖
+export async function sellAllWhitelisted(verbose = true) {
+  const cur = await st();
+  const loc = cur.location?.name || cur.location;
+  if (loc !== 'Farm') {
+    const w = await warp('Farm', 72, 15).catch(() => null);
+    if ((await st()).location?.name !== 'Farm') {
+      if (verbose) log('不在 Farm 且 warp 失败, 无法用出货箱');
+      return 0;
+    }
+  }
+  let total = 0;
+  for (let round = 0; round < 12; round++) {
+    const s = await st();
+    const items = s.inventory.filter(i => i.name && isSellable(i.name) && !QUEST_RESERVE[i.name]);
+    if (!items.length) break;
+    let moved = 0;
+    for (const it of items) {
+      const r = await sellByName(it.name);
+      if (r?.ok && Array.isArray(r.sold) && r.sold.length) {
+        moved += r.sold.reduce((a, x) => a + (x.count ?? 1), 0);
+        if (verbose) log('投箱', it.name + 'x' + (it.stack ?? 1), '→', (r.sold[0]?.price ?? 0) + 'g');
+        ledInc('itemsSold', r.sold.length, '投出货箱');
+      } else {
+        if (verbose) log('投箱失败', it.name, JSON.stringify(r).slice(0, 80));
+        break;
+      }
+    }
+    total += moved;
+    if (!moved) break;
+  }
+  const s2 = await st();
+  if (verbose) log('无点击卖货完成:', total, '件 | 包里还剩可卖', s2.inventory.filter(i => i.name && isSellable(i.name) && !QUEST_RESERVE[i.name]).length, '种');
+  return total;
 }
 
 // 室内传送(2026-10-29验证: POST /warp_into {location,x,y})
@@ -575,7 +718,7 @@ export function stateDelta(prev, cur) {
 
 // --- 累计账本 ledger.json: 累计值单独存, recent 只留 20 条有界预览(防历史无限膨胀) ---
 // 铁律: 累计只增不减; "调用结束≠数量完成", 数字一律来自回执差分, 不来自动作标题
-const LEDGER_PATH = 'D:/StardewAI/ledger.json';
+const LEDGER_PATH = process.env.STARDEW_LEDGER || 'D:/StardewAI/ledger.json';
 function ledLoad() {
   try { return JSON.parse(fs.readFileSync(LEDGER_PATH, 'utf8')); } catch { return { totals: {}, recent: [] }; }
 }
