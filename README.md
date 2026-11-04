@@ -24,6 +24,30 @@
 
 ---
 
+## 🐟 双人联机 · 鱼鱼人话助手（fish-eye）
+
+同一台机器双开两个游戏窗口（主持 `:7842` + 小肥鱼 `:7843`，`V1.6.15-fish` 独立副本、独立 APPDATA），
+两人同处一个世界。小肥鱼在云端经 Tailscale 中继远程接入。
+
+她抱怨"操作不方便"（方位是 0-3 数字 / 周围不带名字 / 走一格点一格 / 没地图 / 收种一格一格 / 水壶要掏出来看），
+于是加了一层**人话翻译层**，零 mod 代码：
+
+```
+GET http://100.98.120.55:17851/say?cmd=看看     → 第2年夏10日 09:30 | 在【Farm】(64,20) | 钱 168g ...
+GET .../say?cmd=地图                            → 文字地图(@=我 W=熟作物 ~=水 ...) + 附近地标
+GET .../say?cmd=收菜                            → /harvest 一次收完周围熟的
+GET .../say?cmd=去田边                          → /walk_to 寻路走整段
+```
+
+- `src/fish-eye-lib.mjs` 纯函数翻译层（方位/格子/地图/水壶/地标/指令解析）
+- `src/fish-eye.mjs` `:7851` HTTP 服务，动作走 `/walk_to /harvest /tool_area /surroundings`，**零物理点击**
+- "家"按人分岔：她 → `Cabin(4,9)`，主持 → `FarmHouse(9,9)`
+- 首次进图调 `/map` 整图预热，地图一次就完整
+- 自测不需游戏：`node src/test/fish-eye.test.mjs`（12 项）+ `node src/test/fish-eye.e2e.mjs`（mock 桥 16 项）
+- 说明书：[docs/fish/guide-fish-eye-人话助手.md](docs/fish/guide-fish-eye-人话助手.md)
+
+---
+
 ## 🏗️ 架构
 
 ```

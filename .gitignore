@@ -5,3 +5,4 @@ node_modules/
 bin/
 obj/
 .DS_Store
+.e2e-tmp/
