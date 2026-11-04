@@ -412,7 +412,7 @@ export async function craftChest() {
 
 // 把手上的箱子放到杂货箱(72,14)附近空地, 成功返回箱子坐标
 export async function placeChestNearHouse() {
-  const spots = [[71, 16], [70, 16], [73, 15], [71, 13], [73, 13], [70, 14]];
+  const spots = [[71, 16], [70, 16], [73, 15], [71, 13], [73, 13], [70, 14], [66, 16], [67, 16], [74, 16], [75, 15], [76, 15], [62, 16], [63, 16]];
   for (const [x, y] of spots) {
     const t = (await surr(14)).tiles.find(z => z.x === x && z.y === y);
     if (!t || t.object || t.crop || t.terrain === 'HoeDirt') continue;
@@ -596,11 +596,27 @@ export async function sellAndStore(chest, force = false) {
       await warp(chest.loc, chest.x, chest.y + 1);
       await sleep(600);
     }
+    let chestRetried = false; // 2026-11-06: 箱满曾让 day-loop 僵尸循环 3 天 0 收入 → 满了自动做新箱
     for (let round = 0; round < 12; round++) {
       const it = (await st()).inventory.find(i => i.name && shouldStore(i.name));
       if (!it) break;
-      if (await storeToChest(it.name, chest)) { stored++; log('存箱', it.name); await sleep(400); }
-      else { log('存箱失败, 停止重试(防空转)'); break; }
+      if (await storeToChest(it.name, chest)) { stored++; log('存箱', it.name); await sleep(400); continue; }
+      if (!chestRetried) {
+        chestRetried = true;
+        const s3 = await st();
+        log('箱子满了, 尝试做新箱 (木头', invCount(s3, 'Wood') + ')');
+        if (invCount(s3, 'Wood') >= 50 && s3.inventory.filter(i => i.name).length < (s3.player.maxItems || 12)) {
+          await warp('Farm', 64, 15); // placeChestNearHouse 的备选点位都在农舍门口附近
+          await craftChest();
+          if ((await st()).inventory.some(i => i.name === 'Chest')) {
+            await sel('Chest');
+            const c2 = await placeChestNearHouse();
+            if (c2) { chest = { ...c2, loc: 'Farm' }; log('新箱已放 @', c2.x, c2.y); continue; }
+          }
+        }
+      }
+      log('存箱失败(没木头做新箱/放置失败), 停止重试(防空转)');
+      break;
     }
   }
   // 2026-11-05 改无点击: openBin 物理右键整套退休(源码实锤 /sell 直接塞出货箱, 零点击零前台)。

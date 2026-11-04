@@ -404,7 +404,7 @@ export async function craftChest() {
 
 // 把手上的箱子放到杂货箱(72,14)附近空地, 成功返回箱子坐标
 export async function placeChestNearHouse() {
-  const spots = [[71, 16], [70, 16], [73, 15], [71, 13], [73, 13], [70, 14]];
+  const spots = [[71, 16], [70, 16], [73, 15], [71, 13], [73, 13], [70, 14], [66, 16], [67, 16], [74, 16], [75, 15], [76, 15], [62, 16], [63, 16]];
   for (const [x, y] of spots) {
     const t = (await surr(14)).tiles.find(z => z.x === x && z.y === y);
     if (!t || t.object || t.crop || t.terrain === 'HoeDirt') continue;
