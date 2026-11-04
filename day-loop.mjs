@@ -5,6 +5,7 @@
 //          → 海滩钓鱼(fishbot) → 23:00 或体力<15 收工 → 尾清仓 → 回家睡觉
 // 一次运行最多连玩 3 天; 锁文件防并发(cron 每15分钟会再拉起, 靠锁避免双实例打架)
 import fs from 'node:fs';
+import { execSync } from 'node:child_process';
 import {
   st, warp, sel, useOn, waterAll, log, invCount, sleep, post, get, surr,
   fishbotSet, foregroundIsStardew,
@@ -26,6 +27,13 @@ try {
     process.exit(0);
   }
 } catch { /* 无锁, 继续 */ }
+// ⭐双保险(2026-11-06): 锁文件曾被外部误删 → 巡检+手动各拉一个实例, 两个实例抢一个角色
+//   (症状: 一边在海滩开 fishbot 一边在田里浇水 = "田里抛竿/拿鱼竿浇水")。进程级再查一次。
+try {
+  const out = execSync('powershell -NoProfile -ExecutionPolicy Bypass -File D:/StardewAI/get-dayloop-pids.ps1', { encoding: 'utf8', timeout: 15000 });
+  const others = out.split(/\s+/).map(Number).filter(pid => pid && pid !== process.pid);
+  if (others.length) { console.log('发现其他 day-loop 进程', others, ', 退出(防两实例抢角色)'); process.exit(0); }
+} catch { /* 进程查询失败则退回锁文件兜底 */ }
 fs.writeFileSync(LOCK, process.pid + ' ' + new Date().toISOString());
 const heartbeat = setInterval(() => { try { fs.utimesSync(LOCK, new Date(), new Date()); } catch { } }, 60000);
 process.on('exit', () => { try { fs.unlinkSync(LOCK); } catch { } });
@@ -198,8 +206,11 @@ async function playOneDay(day) {
     await sleep(300);
     log('fishbot ON =', await fishbotSet(true));
     let lastReport = '';
+    let fishbotKeepalive = 0;
     for (;;) {
       await sleep(20000);
+      // 2026-11-06: fishbot 弹菜单后会自己罢工(视频验收抓到: 干站 5 小时无横幅) → 每 200s 强制拉回 ON
+      if (++fishbotKeepalive % 10 === 0) await fishbotSet(true);
       let s = await st();
       if (s.activeMenu && !/BobberBar/i.test(s.activeMenu.type)) {
         if (s.activeMenu.type === 'ItemGrabMenu') {

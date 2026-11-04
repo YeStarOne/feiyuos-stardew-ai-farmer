@@ -129,6 +129,9 @@ export async function warp(loc, x, y, opts = {}) {
 
 // 浇半径内所有作物（自动 refill），返回成功数
 export async function waterAll(radius = 12) {
+  // 2026-11-06: 换日晕倒后人会在 FarmHouse 床里, 蛇形扫描对 48 块地逐块 8 次无效寻路 = 磨几十分钟假死
+  const s0 = await st();
+  if ((s0.location?.name || s0.location) !== 'Farm') { log('不在农场(' + (s0.location?.name || s0.location) + '), 跳过浇水(防床里死磨)'); return 0; }
   await sel('Watering Can');
   const sr = await surr(radius);
   // 只浇干土: watered=true 的格子保持到次日清晨, 重浇纯浪费(2026-10-29 用户指出)
