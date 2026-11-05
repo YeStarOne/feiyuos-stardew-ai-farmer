@@ -128,8 +128,56 @@ export async function warp(loc, x, y, opts = {}) {
   return { loc: s.location?.name || s.location, x: s.player.x, y: s.player.y, failed: true };
 }
 
+// ===== 2026-11-06 批量动作: /queue 一次提交多条命令(主线程顺序执行, 省往返) =====
+// 命令 DSL: {action:'move'|'face'|'select'|'use'|'charge'|'interact'|'wait'|'warp'|'wait_for_bite'|'key', ...}
+// 返回 {ok, executed, results[]}; 失败抛错由调用方兜底。
+export async function queue(cmds) {
+  if (!cmds?.length) return { ok: true, executed: 0, results: [] };
+  return post('/queue', cmds, 300000); // 桥侧队列最长等 5 分钟(内部有 3~10 tick 命令间隔)
+}
+
 // 浇半径内所有作物（自动 refill），返回成功数
+// 2026-11-06 v2: 改走 /tool_area 批量(内部自动选壶/按升级蓄力/寻路/补漏), 1 次 HTTP 浇一片;
+//   失败/剩格才回退到逐格 waterAllLegacy。实测场次: 90 格从 ~450 次请求降到 3~6 次。
 export async function waterAll(radius = 12) {
+  const s0 = await st();
+  if ((s0.location?.name || s0.location) !== 'Farm') { log('不在农场(' + (s0.location?.name || s0.location) + '), 跳过浇水(防床里死磨)'); return 0; }
+  await sel('Watering Can');
+  const dry = async () => {
+    const sr = await surr(radius);
+    return sr.tiles.filter(t => t.crop && !t.watered);
+  };
+  let crops = await dry();
+  if (!crops.length) { log('浇水: 没有干土'); return 0; }
+  const total0 = crops.length;
+  log(`浇水(批量): 干土 ${crops.length}/${(await surr(radius)).tiles.filter(t => t.crop).length}`);
+  let ok = 0;
+  for (let round = 0; round < 4; round++) {
+    crops = await dry();
+    if (!crops.length) break;
+    const x1 = Math.min(...crops.map(t => t.x)), x2 = Math.max(...crops.map(t => t.x));
+    const y1 = Math.min(...crops.map(t => t.y)), y2 = Math.max(...crops.map(t => t.y));
+    let r;
+    try { r = await post('/tool_area', { operation: 'water', x1, y1, x2, y2 }, 240000); }
+    catch (e) { log('tool_area 失败 → 回退逐格:', String(e).slice(0, 80)); break; }
+    log('tool_area:', JSON.stringify({ ok: r?.ok, swings: r?.swings, patches: r?.patches, missing: (r?.still_missing || []).length, out: r?.out_of_water }).slice(0, 180));
+    if (r?.out_of_water) { await post('/refill', {}); await sleep(700); continue; }
+    if (r?.ok === false && !(r?.still_missing || []).length) break; // 没得浇/工具问题
+    if (!(await dry()).length) break;
+    if ((r?.still_missing || []).length === crops.length) { log('tool_area 没进展 → 回退'); break; }
+  }
+  const left = (await dry()).length;
+  ok = total0 - left;
+  if (left > 0) {
+    log(`批量后还剩 ${left} 格 → 逐格兜底`);
+    ok += await waterAllLegacy(radius);
+  }
+  log('浇水', ok, '/', total0);
+  return ok;
+}
+
+// 逐格浇水(旧实现, 保留作 tool_area 的兜底)
+export async function waterAllLegacy(radius = 12) {
   // 2026-11-06: 换日晕倒后人会在 FarmHouse 床里, 蛇形扫描对 48 块地逐块 8 次无效寻路 = 磨几十分钟假死
   const s0 = await st();
   if ((s0.location?.name || s0.location) !== 'Farm') { log('不在农场(' + (s0.location?.name || s0.location) + '), 跳过浇水(防床里死磨)'); return 0; }
@@ -139,7 +187,7 @@ export async function waterAll(radius = 12) {
   const crops = sr.tiles.filter(t => t.crop && !t.watered);
   // 蛇形逐行扫: 先按行再按列, 同行连浇少跑路(孤格停十几秒的根因=跳行走位, 2026-10-29 用户观察)
   crops.sort((a, b) => (a.y - b.y) || (a.x - b.x));
-  log(`浇水: 干土 ${crops.length}/${sr.tiles.filter(t => t.crop).length}`);
+  log(`浇水(逐格): 干土 ${crops.length}/${sr.tiles.filter(t => t.crop).length}`);
   let ok = 0;
   for (const t of crops) {
     let done = false;
@@ -163,8 +211,41 @@ export async function waterAll(radius = 12) {
     }
     if (done) ok++;
   }
-  log('浇水', ok, '/', crops.length);
+  log('浇水(逐格)', ok, '/', crops.length);
   return ok;
+}
+
+// 批量播种(2026-11-06): 一次 /queue 把"走到位→面朝→下种"全下给主线程。
+// 返回成功下种数; 返回 -1 = 队列不可用/没进展, 调用方回退逐格。
+export async function plantBatch(seedName, maxCount = 99) {
+  const s = await st();
+  const sr = await surr(14);
+  const tiles = sr.tiles.filter(t => t.terrain === 'HoeDirt' && !t.crop && !t.object)
+    .sort((a, b) => (a.y - b.y) || (a.x - b.x)).slice(0, Math.max(0, maxCount));
+  if (!tiles.length) return 0;
+  // 一次拿可走图, 给每格挑一个站位(优先下方/上方/右/左)
+  const x1 = Math.min(...tiles.map(t => t.x)) - 1, x2 = Math.max(...tiles.map(t => t.x)) + 1;
+  const y1 = Math.min(...tiles.map(t => t.y)) - 1, y2 = Math.max(...tiles.map(t => t.y)) + 1;
+  let pass = new Map();
+  try {
+    const pr = await get(`/passable_rect?x1=${x1}&y1=${y1}&x2=${x2}&y2=${y2}&location=${s.location?.name || 'Farm'}`);
+    for (const t of pr.tiles || []) if (t.passable) pass.set(t.x + ',' + t.y, true);
+  } catch { }
+  const isPass = (x, y) => pass.size ? pass.has(x + ',' + y) : true;
+  const cmds = [{ action: 'select', name: seedName }];
+  for (const t of tiles) {
+    const stand = [[t.x, t.y + 1], [t.x, t.y - 1], [t.x + 1, t.y], [t.x - 1, t.y]].find(([cx, cy]) => isPass(cx, cy));
+    if (!stand) continue;
+    cmds.push({ action: 'move', x: stand[0], y: stand[1] });
+    cmds.push({ action: 'face', direction: faceToward(stand[0], stand[1], t.x, t.y) });
+    cmds.push({ action: 'use' });
+  }
+  if (cmds.length <= 1) return 0;
+  const r = await queue(cmds).catch(e => ({ ok: false, error: String(e) }));
+  const placed = (r?.results || []).filter(x => x?.action === 'placed').length;
+  log(`批量播种: ${placed}/${tiles.length} 株 (queue ${r?.ok === false ? '失败:' + (r.error || '') : 'ok'})`);
+  if (r?.ok === false || (!placed && tiles.length)) return -1;
+  return placed;
 }
 
 // ================= 换季清死株 (2026-11-05 事故驱动) =================

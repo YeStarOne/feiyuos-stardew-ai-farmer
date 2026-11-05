@@ -1502,3 +1502,22 @@ POST /rod  {"action":"show"}                // 看当前挂的饵/浮标
    - 偏好表（**已按 `LevelUpMenu.getProfessionName` 源码逐 id 核对**）：farming `1 Tiller→4 Artisan`；fishing `6 Fisher→8 Angler`；foraging `13 Gatherer→16 Botanist`（⚠️15 是 Tapper，不是 Botanist）；mining `18 Miner→21 Prospector`；combat `24 Fighter→26 Brute`。10 级用第二档，缺省回退到"offered 里任一偏好项"，再不行取 offered[0] 并记日志。
 2. **`lock-fish-keep.mjs` → `/fish_areas` 自动换钓点**：假活哨兵连续两轮硬重启（≈4 分钟）都不上鱼时，调 `/fish_areas` 取 `spots[{waterX,waterY,standX,standY}]`，按曼哈顿距离挑最近的可站格 → `warp` → 面朝水格 → 挂饵 → 重开 fishbot；warp 没落地就退回原逻辑。连续上鱼会清零"换点计数"。
 
+### §62.3 批量动作提速 + 简报增强（2026-11-06 晚）
+
+**A. `/queue` 命令 DSL（反编译核对）**：body 是**数组**，每条 `{action:...}`，支持
+`move / face / select / use / charge / interact / wait / warp / wait_for_bite / key`；
+主线程顺序执行，内部自带 3~10 tick 命令间隔与"移动完成再下一条"的等待，最多 5 分钟超时。
+返回 `{ok, executed, results:[{action,ok,...}]}` —— 播种的每条 `use` 成功会记 `action:"placed"`。
+
+**B. `lib.mjs` 新增 `queue(cmds)` + 改造两处**：
+- `waterAll()` → 走 **`/tool_area {operation:"water", x1,y1,x2,y2}`**（桥内部自动选壶、按升级蓄力 3×6、寻路、补漏，返回值含 `swings/patches/still_missing/out_of_water`）。壶空会自动 `/refill` 再来，最多 4 轮；仍有剩格才回退旧的逐格 `waterAllLegacy()`。**90 格地从约 450 次 HTTP 降到个位数**。
+- `day-loop.replantAll()` → 新 `plantBatch(seed,max)`：一次 `/passable_rect` 选站位，然后 `/queue` 批量下 `select→(move,face,use)×N`，按 `results` 里 `placed` 计数；队列失败返回 -1 时自动回退逐格老路。
+- 立即可验的：`/queue [{action:"wait",ms:120}...]` 实测 `executed:2`；空田调 `/tool_area water` 返回 `No unwatered crops nearby`（无副作用）。真正的浇水/播种要等春天有作物再验。
+- ⚠️ 队列里 `move` 无路可走会**瞬移**（和单发 `/move` 不同），所以 `plantBatch` 只挑可走格站位；`use` 对种子走 `placementAction`，与 `/use` 同源。
+
+**C. 每日简报（`day-activator.mjs`）加订单/任务**：
+- `/order_board` → `left/right = {questKey,name,requester}`，简报输出"📋 特别订单: 奇特物质(Wizard) / 生态平衡(Demetrius)"。
+- `/quest_progress` → **字段是 `completed/collected/killed/caught/required/daysLeft`，没有 `currentCount/maxCount`**（手册早期写的字段名是错的）。简报按"有计数或有剩余天数"优先排序取前 3，实测输出"🗒️ 任务(8): 异域饮品(0/1) / 介绍 / 开始"。
+- 重启 `day-activator` 时 `lastDay=-1` 会补发当天一条（实测 id 375），属预期。
+- 踩坑：**别把 stdout 重定向到脚本自己 append 的日志文件**——`>> day-activator.log` 会和 `appendFileSync` 抢句柄，Windows 报 `EBUSY` 直接崩；console 输出要用另一个文件（`day-activator.console.log`）。
+

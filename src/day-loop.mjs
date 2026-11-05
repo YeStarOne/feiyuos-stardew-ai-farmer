@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import {
-  st, warp, sel, useOn, waterAll, log, invCount, sleep, post, get, surr,
+  st, warp, sel, useOn, waterAll, plantBatch, log, invCount, sleep, post, get, surr,
   fishbotSet, foregroundIsStardew,
   isSellable, shouldStore, harvestAll, sellAndStore,
   findChest, storeToChest, craftChest, placeChestNearHouse,
@@ -87,11 +87,16 @@ async function replantAll() {
     await sel(seed.name);
     const cur = (await surr(14)).tiles.filter(t => t.terrain === 'HoeDirt' && !t.crop && !t.object);
     if (!cur.length) break;
-    let planted = 0;
-    for (const t of cur.slice(0, seed.stack ?? 1)) {
-      const r = await useOn(t.x, t.y);
-      if (r.ok) planted++;
-      await sleep(220);
+    // 2026-11-06 批量播种: 一次 /queue 把"走到位→面朝→下种"全下给主线程(90 株从 ~300 次请求降到个位数)
+    let planted = await plantBatch(seed.name, seed.stack ?? 1).catch(() => -1);
+    if (planted < 0) {
+      // 队列不可用 → 回退逐格老路
+      planted = 0;
+      for (const t of cur.slice(0, seed.stack ?? 1)) {
+        const r = await useOn(t.x, t.y);
+        if (r.ok) planted++;
+        await sleep(220);
+      }
     }
     log('种', seed.name, planted, '株');
     if (!planted) break;
