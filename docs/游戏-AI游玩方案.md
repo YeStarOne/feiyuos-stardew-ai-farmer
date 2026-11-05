@@ -617,3 +617,73 @@ Crop.harvest 结尾: 复生作物(RegrowDays>0)收完产物后返回 **false**(�
 
 **验收**: 新 e2e 6 组断言 + 既有 13 单测/19 e2e/8 无点击卖货 e2e 全绿。
 此后 `day-loop` 一整天的动作链里没有任何一行会碰用户的鼠标; 物理点击只剩"兜底老路"和一次性考古脚本。
+
+## 三十七、箱满假成功空转事故(2026-11-05): /store 会假 ok + 背包格数别写死
+
+**现象(用户抓现行)**: 主持拿种子在农场转一圈又一圈, 一颗没种。根因两连:
+1. **木箱满了, /store 返回 ok 但物品没动** → `storeToChest` 只看 `!r.error` 判成功 → 清仓循环把同一件物品重试 12 轮(journal 实锤 24 连发 /store、日志"存箱 Galaxy Dagger"×12), 之后 warp 循环像在"转圈"。
+2. **craftChest 写死 12 格背包**: 联机背包是 36 格(maxItems), 32/36 被误判"背包满拒绝合成" → 做不出新箱, 死循环闭环。
+
+**修复(双 lib 同步)**:
+- `storeToChest`: 存完 sleep 300ms 重读背包, `invCount` 没少 → 返回 false 并喊"箱子满了" (铁律②落地)。
+- `sellAndStore` 存箱循环: 失败即 break(防空转)。
+- `craftChest`: 满包判断改 `s.player.maxItems || 12`。
+
+**其他教训**: 联机背包 36 格, 所有"满包阈值"类硬编码 12 的地方都要过一遍(day-loop 的 slots>=10/11/12 触发清仓同理, 只会早触发不会出错, 暂留)。
+**处置**: 新箱已合成放在 Farm 65,15(农舍门口旁); 旧箱 71,16 满。
+
+### 37.1 /wakeup 是"破起床锁+瞬移出门"双效(2026-11-05 实测)
+夏11→12换日锁卡死(两端 ready_state 都 Locked 2/2 但人不释放): 对 farmhand `POST /wakeup` 一发解决(自动 warp 到 Farm 门口, inBed=false)。⚠️副作用: 对任何人都生效——主持没躺床上也照样被瞬移(warp 到公交站), 主持端别乱发。换日锁卡死的判据=ready_state 里 ready_for_save/wakeup 双双 Locked 2/2 而 inBed 持续 true。
+
+### 37.2 换日锁 = 每晚必卡(2026-11-05/06 连续两晚复现)
+联机换日后 farmhand 必卡床: ready_for_save+wakeup 双双 Locked 2/2, 人留床上挂 ReadyCheckDialog, 天数已翻。
+**标准修法**: 早晨检查 7843 /state → isInBed=true 且 timeOfDay≥610 → `POST 7843/wakeup` 一发即愈(传送到 Farm 52,16)。
+已写进 5 分钟巡检任务自动修。⚠️7842 严禁 /wakeup(会把没睡的主持瞬移)。根因未查(疑似 host 侧 save 后未广播 unlock), 有空反编译 SaveReadyCheck。
+
+### 37.3 赖床第二变体(2026-11-06 上午): 无菜单的 isInBed 残留
+D15 早 fish isInBed=true 但 activeMenu 为空、canMove=true —— 不是换日锁, 是睡醒后没人把她拉出床, bed 标记挂着。
+修法相同: /wakeup (7843) 一发拔掉。**巡检判据已放宽**: isInBed=true 且 timeOfDay≥610 就修, 不再要求看到 ReadyCheckDialog。
+
+## 三十八、day-loop 僵尸四天 0 收入 (2026-11-06): 鱼竿写死 + 箱满无出路
+**现象**: D15-17 连续净 0g, 举着种子钓鱼(用户抓现行"拿着种子对着每个地走一下,然后拿着种子去钓鱼")。
+**根因**:
+1. `sel('Bamboo Pole')` 写死 —— 主持包里是 Fiberglass Rod, sel 失败不报错, fishbot 空转一整天。
+2. 箱满后无出路: 清仓失败 → "提前收工防丢鱼" 跳过钓鱼 → 睡觉 → 次日循环, 净 0g 连滚 3 天。
+**修复**:
+- day-loop 鱼竿按背包正则 /Rod|Pole/i 现选, 没竿跳过钓鱼段。
+- sellAndStore: 存箱失败自动做新箱(warp 农舍门口 → craftChest(需木≥50+有空格) → placeChestNearHouse), placeChestNearHouse 点位扩到 13 个; 只重试一轮防转圈。
+**教训**: "清晨满包先清仓"的顺序让箱满问题卡死整条链 —— 以后任何"失败即跳过"的分支必须给出路或醒目报警。
+
+### 38.1 lib fetch 全量 30s 超时(2026-11-06): 无超时挂死 = 主持躺床半小时没人管
+day-loop 冻结在 01:46:43 日志线后半小时(进程活、日志死), 根因=某个桥 fetch 无超时永不返回。
+修: lib.mjs 的 get/post 全部 `AbortSignal.timeout(30s)`(env STARDEW_FETCH_TIMEOUT 可调), post 第三参可传自定义超时。
+教训: 任何"等桥"的调用必须有超时+上层当日重试兜底, 否则一个 hiccup = 整个自动化假死。
+
+## 三十九、换季死株 = 农田荒 18 天的真凶 (2026-11-05)
+**现象**: 用户报"小肥鱼掉线了, 农作物都死了, 可以回档一下"。看农场 43 株全枯, 从秋1 到秋19 一颗都没种上(收入全靠钓鱼, 1万→4.79万g)。
+**定性(别甩锅掉线)**: 死株全是 **seedIndex 479甜瓜11 / 480番茄7 / 481蓝莓15 / 482辣椒13**, 即 43 株夏菜 —— 死因是 **夏→秋换季**(Fall 1 那一刻集体枯死), 星露谷固定机制, 跟 farmhand 掉线无关, 回档也救不回来(回档到夏25 只能多收一茬≈5.9k, 却要丢 47.6k 现金 + 18 个游戏日)。
+**真问题**: 死株不会自己消失, 一直占着那块 HoeDirt; 而 `replantAll` 只认 `!t.crop` 的格子 → 换季后补种全被跳过, 田整整荒了 18 个游戏日。
+**修复**: `lib.clearDeadCrops()` + day-loop 每天早晨第一步农活就调它(镰刀逐格割)。实测 42/43 一次清空(农场作物 43→0), 剩 1 格 (73,18) 够不着。
+### 39.1 死株名单只能从存档 XML 读(桥看不出死活)
+桥的 `/surroundings` 只给 `terrain/crop/cropPhase/harvestable/cropName/cropRegrow`, **不暴露 `dead`** —— 光看桥分不出"死株"和"没熟的活苗"(两者都 harvestable=false), 所以**绝不能按 `!harvestable` 盲扫镰刀**(会连活苗一起割)。
+正解: 读存档 XML 里 `<crop>...<dead>true</dead>...<seedIndex>N</seedIndex></crop>` 的格子坐标。存档恰好在每天起床那一刻才写(= day-loop 开跑的时刻), 读它=读"今晨 6:00 的地面真相", 精确且零误伤。
+**踩坑**: ①不能 `indexOf('xsi:type="Farm"')` 切地图块 —— 存档前面还有别的带这个属性小节点, 会切出 1474 字符的假 Farm 块(死株数=0); 要用 `<GameLocation xsi:type="X">` 的位置表按"最近的前一个地图头"归属。 ②存档有时压(PK zip)有时不压(SMAPI 日志 "Saving without compression"), 两种都要能吃。
+### 39.2 `/buy` 也能买工具(鱼竿实测, 2026-11-05)
+farmhand 没鱼竿时: `POST 7843/buy {id:'(T)BambooPole', quantity:1}` → `{"ok":true,"bought":"Bamboo Pole","unitPrice":100,"totalCost":100}`, 竹鱼竿直接进包(训练鱼竿 `(T)TrainingRod` 同价 100g)。⚠️**/buy 是平价 100g, 不是威利的 500g/25g 定价** —— 不影响用, 但算钱别按商店价。工具类 id 前缀是 `(T)`(如 `(T)Axe`), 普通物品 `(O)`。
+### 39.3 farmhand 背包 12 格很容易满
+她 12 格 = 5 工具 + 3 种子 + 2 鱼竿 → 满, 钓到鱼存不下(旧文档 §九 的 inventory_full 卡 fishbot 同源)。扔杂物必须用**她自己的桥**: `POST 7843/store {name,x,y}` 远程可存(实测 Wood/Moss 成功), 但 **工具(Training Rod)会返回 `stored:[]` 的假成功** —— 存不进箱子, 别信 `ok:true`, 要看 `stored` 数组非空。
+### 39.4 钓鱼坐标实测表 (2026-11-05, 用户问"告诉鱼鱼坐标了吗"才发现从没给过具体坐标)
+
+**为什么她找不到水塘**: 我们一直只说"对着水面抛竿", 没给坐标。农场池塘在 x70-75 / y28-33（她常站在 (51,30)，不在水边）。
+
+**实测有效点(主持 Fiberglass Rod, fishingLevel=10)**:
+- 海滩 (44,35) 面朝右(方向=1) → 漂落 (51,35)。实测 60 秒上 3 条，当前最稳的点。
+- 农场池塘 (71,27) 面朝下(2) → 漂落 (71,29)；或 (71,34) 面朝上(0)。抛竿返回 ok，但 60 秒 0 咬钩，只能当备选。
+
+**找水域的正解**: `/surroundings` **不返回 water 字段**。水格判据 = `passable:false && !terrain && !object && !bigCraftable && !isStone && !isWeeds && !isTwig`。按这个过滤，再筛出"四邻里有水格"的可站格当钓点，用"面朝方向连续水格数"当水深打分。农场可站钓点 38 个（水深≥3 的 8 个）；海滩用同法算。
+
+**钓鱼指令链**: `/select` 鱼竿 → `/move` 或 `/warp` 到点 → `/face` 朝水 → `/use` 抛竿 → 等 `player.fishing.isNibbling` → `/use` 起竿 → BobberBar 小游戏。
+
+**⚠️ /fishbot 是 toggle 的坑**: 实测出现 `fishbot on → {"enabled":false}` 的反向结果(我误以为开了其实关了, 白等 60 秒 0 鱼)。`fishbotSet` 只在"返回 ≠ 目标态"时补一刀；如果第一次调用本身就把状态切到相反方向，它会误判已达成。判定要 `enabled === true` 才算开，不确定就再发一次核对。
+
+**⚠️ BobberBar 不是模态菜单**: 守护循环关菜单必须白名单放行 BobberBar（见 §九 第 21 条）。它在 `activeMenu` 里出现但游戏没停，盲目 /menu_close = 每竿必丢鱼。
