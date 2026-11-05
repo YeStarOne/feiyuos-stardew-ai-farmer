@@ -1,0 +1,1 @@
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'mine-(forever|session)\.mjs|smelt-session' } | ForEach-Object { Write-Host ("kill " + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force }

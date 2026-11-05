@@ -71,6 +71,31 @@ GET .../say?cmd=去田边                          → /walk_to 寻路走整段
 
 ---
 
+## ⛏️ 矿洞自动化（挖矿 + 战斗 + 熔炼）
+
+早春靠矿洞起步（铜→熔炉→铜水壶），后来做成一套能自己下矿、打怪、挖矿、回家熔炼的流水线。
+和钓鱼线一样，它踩的坑比代码多。
+
+| 脚本 | 作用 |
+|---|---|
+| `src/mine-session.mjs` | **挖矿+战斗会话**（v0.4）：视野内有怪→切剑→走到 1 格外→面朝挥击，清完继续挖；镐子直接砸矿、踩梯下楼，达到目标层数/体力/时间就回农场 |
+| `src/mine-forever.mjs` | **常驻监工**：spawn `mine-session`，退出就复活；单实例互锁（启动时按命令行精确杀掉旧 `mine-*` 进程，不碰其它 node） |
+| `src/craft-smelt.mjs` | 烧锭自动化：从 `/machines` 动态发现熔炉 → 投矿+煤 → `/interact` 收锭（炉位不再硬编码） |
+| `src/smelt-session.mjs` | 批量熔炼会话：目标铁条/金条数量，逐炉装料、等出炉、清点 |
+| `src/mine-run.mjs` | 早版编排：`warp('UndergroundMine1',5,5)` 进矿、电梯层清单、镐子砸矿主路径 |
+| `src/mine-calibrate.mjs` | 镐子校准实测：直用 `/use` vs 行为学框选，全程回查验证 |
+| `tools/killmine.ps1` | 一键停掉所有 `mine-*` 进程 |
+
+**矿洞专属坑（血泪）**：
+- **正门 y=-1 不可达**，`warp('Mine')` 会掉到 (-99,-99) limbo —— 唯一通路是 `warp('UndergroundMine1')`。
+- 电梯端点 `POST /mine/elevator {floor:N}` 实测**只 reset 不传送**，下楼只能踩梯子（入口梯 10,4 有效）。
+- 矿洞内 `warp` 后游戏时间会异常快进（见过 920→2410），下矿后必须盯着时间。
+- **框选（BehaviorBridge）挖矿有效，框选打怪无效** —— 打怪只能一格一格走位挥击。
+- 机器不随冻结时间走：熔炼要装料后 `/resume` 放时间走、收完再 `/pause`；NagiBridge 的 `/resume` 有时推不动时间，用 `FeiyuAutoLoad` 的 `/clock` 直接推 130 分钟。
+- 隔石打怪会死循环（挥空计数 + 挪位兜底）；`/heal` 免费满血，是濒死保险丝。
+
+---
+
 ## 🏗️ 架构
 
 ```
