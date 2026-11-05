@@ -18,7 +18,7 @@ if (!s.worldReady || !s.player) { console.error('✗ 世界未就绪'); process.
 const fest = await X.raw.get('/festival').catch(() => null);
 console.log('当前:', s.location?.name, '| 节日:', fest?.isFestival ? (fest.festivalName || '?') : '无');
 
-const r = await X.eggTiles('');
+const r = await X.eggTiles({ map: '' });
 if (r.ok === false) { console.error('✗ /egg_tiles', r.error); process.exit(1); }
 const tiles = r.tiles || [];
 console.log(`fest 图块 ${r.count} 个 (map=${r.map})`);

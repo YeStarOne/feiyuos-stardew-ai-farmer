@@ -1479,3 +1479,16 @@ POST /rod  {"action":"show"}                // 看当前挂的饵/浮标
 
 **另外**：`lock-fish-keep.mjs` 的进食分支现在会先读 `/buffs` 记一行当前 buff 余量
 （判断"是真饿还是 buff 掉了"，也方便回看吃了什么）；重启后生效（进程 PID 会变）。
+
+### §62.1 同日追加：173 个端点 100% 封装（lib-extra.mjs v2）
+
+用户拍板"全部接上省得再造轮子"。做法是**生成而不是手抄**：
+`dll-audit/_gen-routes.mjs` 从反编译源码提取每条路由的 handler/方法/入参（`routes.json`），
+`dll-audit/_gen-lib.mjs` 合并端点手册里 115 条已有描述 + 手工 20 类分类 + 40+ 条坑位注记，
+自动生成 `lib-extra.mjs`（601 行）和 `docs/端点全表.md`（173 条全表）。
+
+- **约定**：路由 `/warp_building` → `warpBuilding({...})`；GET 参数走 query，POST 走 JSON body；`API` 导出机器可读元数据。
+- **CLI**：`node xp.mjs api 关键字` 搜索 / `get|call <路径>` 通用探测；⚠️ Git Bash 下路径**别带开头 `/`**（会被转成 `D:/Program Files/Git/...`，xp.mjs 已做兼容）。
+- **验收**：`_smoke-extra.mjs` 72 个只读端点实机回归 = 69 OK + 3 个预期业务错 + 0 真失败。
+- **改文档/注记要改生成器再重跑**，直接改 `lib-extra.mjs` 会被下次生成覆盖。
+- 生成器自己的坑：手册表格解析要剥反引号（routeCell 带 \`\`），参数串和描述要用"纯标识符"启发式分开，否则描述列会被 `location,x,y` 这类参数串顶掉。
