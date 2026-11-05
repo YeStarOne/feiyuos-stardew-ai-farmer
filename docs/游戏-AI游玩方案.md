@@ -1444,3 +1444,38 @@ POST /rod  {"action":"show"}                // 看当前挂的饵/浮标
 2. **假活哨兵**：同一号连续 6 次巡检（≈2 分钟）`fishCaught` 不涨 → fishbot 硬重启 + 重选竿 + 补饵。
 
 ⚠️ 挂机前先看一眼 `/rod`：鱼竿的饵是消耗品，100 个大约能撑 1~1.5 个游戏日的连续钓鱼。
+
+---
+
+## §62 端点扩展包：9 个"知道但没接"的端点已接入（2026-11-06）
+
+新增三个文件，把 `/guard /egg_tiles /carpenter /sell_to_shop /buffs /bombs /crawl_bed /menu/claim_swap /sittable`
+做成可复用封装 + CLI + 两个场景脚本：
+
+| 文件 | 作用 |
+|---|---|
+| `lib-extra.mjs` | `extra(port)` 工厂，`HOST`(7842) / `FISH`(7843) 两套；只读端点直调，副作用端点单独标注 |
+| `xp.mjs` | CLI：`buffs / bombs / eggs [map] / sittable / carpenter / beds / guard on|off / sell / swap / all`；锁时期间（`time-lock.flag` 在位）自动拒绝 `guard/sell/swap`，要 `--force` |
+| `build-plan.mjs` | 罗宾建筑规划：25 项造价+材料，按 `itemId` 对背包算"木头 67/300"，标"还差多少钱" |
+| `egg-festival.mjs` | 蛋蛋节清扫：默认只读打印彩蛋坐标，`--go` 才逐个 `walk_to` 走过去踩（未到节日会拒绝） |
+
+**这一轮实机/源码核对出来的 8 个坑**：
+
+1. **`/egg_tiles` 确实是彩蛋坐标** —— 游戏本体 `Event.cs` 的 `eggHunt` 分支（`festivalProps`）就是同一段逻辑：
+   扫 `Paths` 层里 `TileSheet.Id.StartsWith("fest")` 的图块，把它们当道具摆出来，`festivalTimer=52000`。
+   ⚠️ **1.6 节日地图改名了**：不是老攻略里的 `spring13`，而是 **`Town-EggFestival` / `Town-EggFestival2`**；
+   `?map=` 传旧名会 `ok:false "The content file was not found."`。实测两张图分别 32 / 35 个蛋。
+2. **`/guard` 只服务 farmhand**：房主进程调 `on` 会被拒；但 `off` 房主也能调（关防护是全局状态）。
+   它会把武器换到手上 → **钓鱼/浇水/收割进行中绝对不要开**。已接进 `mine-session.mjs`（进出矿自动开关，host 上是 no-op 只记一行）。
+3. **`/carpenter` 的 `materials` 是 `{id, amount}`**，没有名字、也没有 `count/quantity`：
+   想显示"木头 300"必须自己按 `(O)388` 这类 itemId 对背包（`build-plan.mjs` 已带一张常见建材表）。
+   另外它只在"钱够 **且** 材料够"时给 `affordable:true`，别把它当"钱够不够"用。
+4. **`/sittable` 的 `face` 是布尔**（是否面朝玩家），朝向在 `direction`；`free` 是**剩余座位数**不是布尔。
+5. **`/crawl_bed` 的参数是 `player` 不是 `who`**（报错文案里写成了 who，源码读的是 `player`），动作 `locate|beds|sleep`，默认 `locate` 纯只读。
+6. **`/bombs` 只列"已点燃的炸弹"**（`temporarySprites` 里 `bombRadius>0`），背包里的炸弹不算；用于炸矿时别站上去。
+7. **`/sell_to_shop` 与 `/sell` 的分工**：`/sell` 只认 Farm（出货箱、整叠）；`/sell_to_shop` 认当前所在商店、可指定数量。
+   锁时期间为避免打断钓鱼，本轮**没有实机验证**，等解锁后第一次用再回填。
+8. **`/menu/claim_swap` 需要 ItemGrabMenu 开着**才有意义（宝箱满时用背包物品换出），同样留待解锁后验证。
+
+**另外**：`lock-fish-keep.mjs` 的进食分支现在会先读 `/buffs` 记一行当前 buff 余量
+（判断"是真饿还是 buff 掉了"，也方便回看吃了什么）；重启后生效（进程 PID 会变）。

@@ -13,6 +13,17 @@ let totalLevels = 0;
 let oresMined = 0;
 let heals = 0;
 
+// 2026-11-06 /guard 接入: 桥自动近战护身(每 tick 3×3 内找怪→转身挥武器, 不移动)
+// ⚠️ 反编译实锤: 只服务 farmhand, 房主进程会拒绝(ok:false); 这里失败只记一行, 不影响挖矿。
+async function guardSet(on, weapon = 'Galaxy Dagger') {
+  try {
+    const r = await post('/guard', { on, weapon });
+    if (r && r.ok !== false) log(on ? '🛡️ guard 已开' : '🛡️ guard 已关', weapon);
+    else if (on) log('guard 不可用(仅 farmhand):', String(r?.error || '').slice(0, 50));
+    return r;
+  } catch (e) { log('guard 调用失败', String(e).slice(0, 50)); return null; }
+}
+
 async function invOres() {
   const s = await st();
   return s.inventory.filter(i => i.name && oreRe.test(i.name)).map(i => i.name + 'x' + (i.stack ?? 1)).join(',');
@@ -345,6 +356,7 @@ console.log(JSON.stringify(entered));
 await post('/pause', {});
 log('⏱ 已锁时间(挖矿继续, 时钟停)');
 await sleep(600);
+await guardSet(true); // farmhand 才生效; 房主这里是 no-op
 let why = 'levels';
 let napCount = 0;
 for (let level = startFloor; level <= TARGET_LEVEL; level++) {
@@ -430,6 +442,7 @@ for (let level = startFloor; level <= TARGET_LEVEL; level++) {
   log('→ 到达层', lvl, compactState(s));
 }
 log(`== 撤出(${why}) 层数${totalLevels} 矿物: ${await invOres()} ==`);
+await guardSet(false);
 await post('/resume', {}); // 恢复时钟(锁时间作弊收尾)
 await go(10, 4).catch(() => null);
 await sleep(1500);

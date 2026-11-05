@@ -108,6 +108,10 @@ async function keep(label, A, { allowSell }) {
   //   低于 90 就吃背包里最好的食物(避开咖啡这种只回 3 点的), 吃到 220 以上;
   //   吃完 /select 手里会变成食物, 所以必须再把竿拿回来。
   if ((p.stamina ?? 270) < 90) {
+    // 2026-11-06 接 /buffs: 记录当前 buff 余量(判断"是真饿还是 buff 掉了", 也避免重复吃同类)
+    const bf = await A.get('/buffs').catch(() => null);
+    const bl = (bf?.buffs || []).map(b => `${b.displayName || b.id} ${Math.round((b.msRemaining || 0) / 60000)}min`).join(', ');
+    if (bl) log(label, '当前buff:', bl);
     for (let k = 0; k < 5; k++) {
       const cs = await A.state().catch(() => null);
       if (!cs?.player || cs.player.stamina >= 220) break;
