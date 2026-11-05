@@ -97,6 +97,36 @@ GET .../say?cmd=去田边                          → /walk_to 寻路走整段
 
 ---
 
+## 🗂️ 仓库文件地图
+
+| 文件 | 作用 |
+|---|---|
+| **核心库** | |
+| `src/lib.mjs` / `src/lib-fish.mjs` | 主持(:7842) / 鱼鱼(:7843) 两端核心库：状态、寻路、传送、选物、钓鱼、卖货白名单、砍树、存箱 |
+| `src/world-map.mjs` | 地图数据层：63 个地标、门坐标/营业时间、`/warps` 索引、可走图缓存 |
+| `src/behavior-bridge/` | 自研 C# mod（BehaviorBridge）：把"行为学"框选暴露成 HTTP :7845 |
+| `src/feiyu-autoload/` | 自研 mod（FeiyuAutoJoin/Load）：开机自动连主持、选角色；`/clock` 时间推进 |
+| **日常循环 / 守卫** | |
+| `src/day-loop.mjs` | 主持全自动日循环（收菜→浇水→补种→砍树做箱→卖货→钓鱼→睡觉存档） |
+| `src/host-night-guard.mjs` / `src/fish-night-guard.mjs` | 双端夜间守卫：到点睡觉、存档 mtime 校验、赖床死循环破环 |
+| `src/newday-trigger.mjs` | 换日总控：清卡菜单（结算多页连点）、写简报、卡死哨兵、赖床自动修 |
+| `src/day-activator.mjs` | 每天给鱼鱼投一条"今日简报"（留言板） |
+| `src/clear-dead.mjs` | 换季清死株（读存档 XML `dead=true` 格子 → 镰刀逐格清） |
+| `src/festival-lock.mjs` | 节日锁时 / 解锁（`/pause` 成对、停自动流程） |
+| **钓鱼线** | |
+| `src/fish-fishbot.mjs` | 鱼鱼自动钓鱼 keeper（铱竿优先、包快满回农场卖、锁时停手） |
+| `src/lock-fish-keep.mjs` | 锁时期间双人看护：补饵、进食、清包、假活硬重启 |
+| `src/fish-settlement-guard.mjs` | 鱼鱼每日结算页看门狗（多页点到消失） |
+| **矿洞线** | 见上一节 `mine-*` / `smelt-session` / `craft-smelt` |
+| **人话助手** | `src/fish-eye.mjs`(:7851) + `src/fish-eye-lib.mjs` + `src/test/`（单测 / mock e2e） |
+| **通信** | `src/fish-bridge.mjs`(:7850) 双人留言板，落盘 `fish-bridge.json` |
+| **早期单步脚本** | `src/till-plant.mjs`（锄+种）、`src/water-check.mjs`（浇水检查）、`src/night-guard.mjs`（守卫 v1，已退役）、`src/behavior-test.mjs`（行为学桥探针）、`src/bwiki.mjs`（wiki 抓取） |
+| **工具** | `tools/fg-name.ps1` 前台进程名（物理点击互锁）、`tools/activate.ps1` 激活窗口、`tools/diag.ps1` 诊断、`tools/screen.ps1` 截图、`tools/leftclick.ps1`/`rightclick.ps1` 物理点击、`tools/wind.ps1` 窗口、`tools/kill-loop.ps1` 杀循环、`tools/killmine.ps1` 杀挖矿、`tools/crop-audit.py` 直接读存档 XML 审计作物 |
+
+> 完整的进程 / 端口 / 日志 / 启停速查见 [docs/脚本总览.md](docs/脚本总览.md)。
+
+---
+
 ## 🏗️ 架构
 
 ```
