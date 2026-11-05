@@ -11,7 +11,7 @@ import {
   fishbotSet, foregroundIsStardew,
   isSellable, shouldStore, harvestAll, sellAndStore,
   findChest, storeToChest, craftChest, placeChestNearHouse,
-  chopWood, expandField,
+  chopWood, expandField, clearDeadCrops,
   compactState, ledInc, ledSnapshot, memAdd, memList, regionConfig
 } from './lib.mjs';
 
@@ -163,6 +163,13 @@ async function playOneDay(day) {
   }
   // 1. 农活
   log(JSON.stringify(await warp('Farm', 65, 21)));
+  // ⭐2026-11-05 事故: 换季那一刻旧季作物全枯, 死株占着 HoeDirt 不会消失, 而补种只认空翻地
+  //   → 从秋1到秋19 整整十八个游戏日田里一颗都没种上(收入全靠钓鱼), 用户看到"农作物都死了"。
+  //   清死株名单只认存档 XML(桥的 /surroundings 不暴露 dead 字段), 详见 lib.clearDeadCrops 注释。
+  {
+    const cleared = await clearDeadCrops().catch(e => { log('清死株异常:', String(e).slice(0, 90)); return 0; });
+    if (cleared) ledInc('deadCropsCleared', cleared, '换季清死株');
+  }
   // 2026-11-05 收菜合并为 harvestAll: /harvest 本来就能收复生作物(草莓/蓝莓), 只信背包差分不信计数,
   // 收完自动扫 /debris 把多产的掉落走过去捡掉 —— 整段零点击零前台
   {

@@ -23,6 +23,7 @@
 //      (两条 SMAPI 日志都验证过"补丁已应用") → 游戏失焦照常 tick。
 const BASE = process.env.STARDEW_BASE || 'http://localhost:7842';
 import fs from 'node:fs';
+import zlib from 'node:zlib';
 import { execSync } from 'node:child_process';
 
 // 2026-11-06: 所有桥调用加超时 —— 曾因一个无超时 fetch 挂死整个 day-loop 半小时(主持躺床上没人管)
@@ -163,6 +164,81 @@ export async function waterAll(radius = 12) {
     if (done) ok++;
   }
   log('浇水', ok, '/', crops.length);
+  return ok;
+}
+
+// ================= 换季清死株 (2026-11-05 事故驱动) =================
+// 事故: 夏→秋换季那一刻农场上 43 株夏菜(种子 479甜瓜/480番茄/481蓝莓/482辣椒)全部枯死。
+//   死株不会自己消失, 一直占着那块 HoeDirt; 而 replantAll 只认 `!t.crop` 的格子 →
+//   从秋1 到秋19 整整十八个游戏日, 主持一颗种子都没种下去(收入全靠钓鱼), 用户看到"农作物都死了"。
+// 难点: 桥的 /surroundings 不暴露 crop.dead(只有 crop/cropPhase/harvestable/cropName),
+//   光看桥分不出"死株"和"没熟的活苗" —— 盲扫镰刀会把活苗一起割掉, 所以不能靠桥判断。
+// 出路: 死株名单只从存档 XML 读。存档恰好在每天起床那一刻才写(= day-loop 开跑的时刻),
+//   所以读它=读"今晨 6:00 的地面真相", 既精确又零误伤(只割 dead=true 的格子)。
+// ⚠️别改成"按 !harvestable 扫一遍": 没熟的活苗同样 !harvestable, 会连苗一起割。
+export const SAVE_PATH = process.env.STARDEW_SAVE
+  || 'C:/Users/Administrator/AppData/Roaming/StardewValley/Saves/肥鱼肥鱼_452739119/肥鱼肥鱼_452739119';
+
+// 读存档原文: 游戏有时压(PK zip)有时不压("Saving without compression" 那档), 两种都吃
+export function readSaveText(p = SAVE_PATH) {
+  const buf = fs.readFileSync(p);
+  if (buf[0] === 0x50 && buf[1] === 0x4b) {
+    const i = buf.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    if (i < 0) throw new Error('存档是 zip 但找不到本地文件头');
+    const nameLen = buf.readUInt16LE(i + 26), extraLen = buf.readUInt16LE(i + 28);
+    const start = i + 30 + nameLen + extraLen, compSize = buf.readUInt32LE(i + 18);
+    const method = buf.readUInt16LE(i + 8);
+    const raw = buf.subarray(start, start + compSize);
+    return (method === 0 ? raw : zlib.inflateRawSync(raw)).toString('utf8');
+  }
+  return buf.toString('utf8');
+}
+
+// 死株坐标(只取 Farm 地图块内的: 姜岛的够不着, 不列)
+// ⚠️别用 indexOf('xsi:type="Farm"') 找地图块起点 —— 存档里前面还有别的带这个属性的小节点,
+//   会切出一段不含作物的假 Farm 块(实测踩过: 切出 1474 字符的空块, 死株数=0)。
+//   正解: 用 <GameLocation xsi:type="X"> 的位置表, 取每条记录前面最近的那个地图名。
+export function deadCropTiles(p = SAVE_PATH) {
+  const t = readSaveText(p);
+  const heads = [...t.matchAll(/<GameLocation xsi:type="(\w+)"/g)].map(m => ({ i: m.index, name: m[1] }));
+  const locAt = (i) => { let n = '?'; for (const h of heads) { if (h.i < i) n = h.name; else break; } return n; };
+  const out = [];
+  const re = /<key><Vector2><X>(\d+)<\/X><Y>(\d+)<\/Y><\/Vector2><\/key><value>(.*?)<\/value><\/item>/gs;
+  for (const m of t.matchAll(re)) {
+    if (!m[3].includes('<dead>true</dead>')) continue;
+    if (locAt(m.index) !== 'Farm') continue;   // 只清主农场
+    out.push({ x: +m[1], y: +m[2] });
+  }
+  return out;
+}
+
+// 挥镰刀清死株, 返回清掉的格数; 没有死株=零开销直接返回
+export async function clearDeadCrops(p = SAVE_PATH) {
+  const tiles = deadCropTiles(p);
+  if (!tiles.length) { log('清死株: 存档里没有死株, 跳过'); return 0; }
+  log(`清死株: 存档里有 ${tiles.length} 株死株(换季枯死), 上镰刀`);
+  const before = (await get('/farm_report').catch(() => null))?.crops?.total;
+  const w = await warp('Farm', 65, 21);
+  if (w.failed) { log('清死株: 到不了农场, 放弃(别乱挥镰刀)'); return 0; }
+  tiles.sort((a, b) => (a.y - b.y) || (a.x - b.x));  // 蛇形: 同行连着割少跑路
+  let ok = 0;
+  for (const t of tiles) {
+    let done = false;
+    for (const [cx, cy] of [[t.x, t.y + 1], [t.x, t.y - 1], [t.x + 1, t.y], [t.x - 1, t.y]]) {
+      if (!(await go(cx, cy))) continue;
+      await sel('Scythe');            // 每格重选: 中途 /use 弹过菜单/换过手持就不认了
+      const c = await st();
+      await face(faceToward(c.player.x, c.player.y, t.x, t.y));
+      await sleep(120);
+      const r = await post('/use', {});
+      done = !!(r.tile && r.tile.x === t.x && r.tile.y === t.y);
+      break;
+    }
+    if (done) ok++; else log(`死株(${t.x},${t.y}) 没割掉(够不着?)`);
+    await sleep(120);
+  }
+  const after = (await get('/farm_report').catch(() => null))?.crops?.total;
+  log(`清死株: 挥镰 ${ok}/${tiles.length}, 农场地里作物 ${before} → ${after}(该到 0)`);
   return ok;
 }
 
