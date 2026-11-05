@@ -687,3 +687,760 @@ farmhand 没鱼竿时: `POST 7843/buy {id:'(T)BambooPole', quantity:1}` → `{"o
 **⚠️ /fishbot 是 toggle 的坑**: 实测出现 `fishbot on → {"enabled":false}` 的反向结果(我误以为开了其实关了, 白等 60 秒 0 鱼)。`fishbotSet` 只在"返回 ≠ 目标态"时补一刀；如果第一次调用本身就把状态切到相反方向，它会误判已达成。判定要 `enabled === true` 才算开，不确定就再发一次核对。
 
 **⚠️ BobberBar 不是模态菜单**: 守护循环关菜单必须白名单放行 BobberBar（见 §九 第 21 条）。它在 `activeMenu` 里出现但游戏没停，盲目 /menu_close = 每竿必丢鱼。
+## 四十、farmhand 换日同步死锁 → 唯一解是重启客户端 (2026-11-05 实锤)
+
+### 40.1 症状
+- 鱼鱼(7843)画面停在 **「第3年秋季23日」+「正在等待其他玩家……(1/2)」**，一动不动 30 分钟以上。
+- `/state` **还能正常返回**（`worldReady:true`、`time.timeOfDay` 甚至还在涨），但**所有走主线程的端点全部 HTTP 超时**（8s 无响应）：`/menu` `/settlement_confirm` `/key` `/click` `/wakeup` `/warp_into` 全挂。
+- SMAPI 的 `SMAPI-latest.player-2.txt` 尾部只有两行就断了：
+  ```
+  08:56:47 TRACE SMAPI] Synchronizing 'NewDay' task...
+  08:56:47 TRACE SMAPI]    task complete.
+  08:56:55 TRACE SMAPI] Context: before save.
+  ```
+  （她的 FeiyuAutoLoad 每 10 秒一条 TDiag，到这里也停了。）
+
+### 40.2 误判与真因
+- 第一反应是「出货结算单 ShippingMenu 关不掉」（她 118 号留言报过同样的现象）→ 于是发 `/settlement_confirm`。
+  **没用，也超时** —— 因为 `EnqueueMainThread` 队列已经被 NewDay 同步堵死，后面所有请求都在排队。
+- 真因：**联机换日时客户端卡在 NewDay 的 save 同步里**，主机（主持）那天 08:56:53 已经存完快照并进入 Day23 正常游玩，客户端却永远停在"等待其他玩家"。
+- 注意 `/state` 会骗人：它不走主线程队列，所以看起来"游戏还活着、时间还在走"。
+
+### 40.3 处置（唯一有效）
+1. **只杀 farmhand 的进程**：按 `Get-Process` 的 `.Path` 区分（主持=`…\V1.6.15\StardewModdingAPI.exe`，鱼鱼=`…\V1.6.15-fish\…`）。
+   ⚠️ 绝不 `taskkill /IM`，绝不碰主持进程。
+2. 重新跑 `G:\量化系统安装包\V1.6.15-fish\start-fish.bat`（内含 `FEIYU_PORT=7847`、`FEIYU_AUTOLOAD=0`）。
+3. 等 1~2 分钟，客户端会**自己重连回主持的存档**（本次实测 09:00:47 启动 → 09:02 `worldReady:true`，位置回到主持身边）。
+4. 不丢东西：存档在主机端，主持换日时已落快照。
+
+现成脚本：`D:/StardewAI/restart-fish.ps1`（只杀 V1.6.15-fish 那个进程，然后原样拉起）。
+
+### 40.4 背包升级（Pierre 店）
+- **营业 9:00–17:00，周三休业**；过了 17:00 柜台点了没反应。
+- 两级：12→24 格 = **2000g**；24→36 格 = **10000g**（满级共 12000g）。
+- **柜台交互坐标**（2026-11-05 实测）：站 **(4,19)** 面朝上(0) → 朝向格 (4,18) → `/interact` 返回 `actionTriggered:true` 才开 ShopMenu。
+  ⚠️ 旧文档写的"站 (4,18) 面朝上"是错的 —— (4,18) 是柜台本身，站不住，`/warp_into` 会把人挪到 (4,17)（正好压在皮埃尔身上）。
+- 升级是**纯 UI 操作**（商店右下角的背包图标），桥没有对应端点：`/buy` 只会 `ItemRegistry.Create` 造物品，造不出背包升级。
+
+## 四十一、farmhand 开机自动加入房间 (FeiyuAutoJoin, 2026-11-05)
+
+### 41.1 要解决什么
+鱼鱼每次重开客户端都要人工点：**标题页 → 合作 → Enter IP(localhost) → 选角色 → 进图**。
+用户要求全自动。现成 mod 里 `FeiyuAutoLoad` 只管主机端"自动读最新存档"，farmhand 用不上（它的 `FEIYU_AUTOLOAD=0`）。
+
+### 41.2 做法：自己写一个 SMAPI mod
+源码 `D:\StardewAI\mods\FeiyuAutoJoin\`，部署到 `G:\量化系统安装包\V1.6.15-fish\Mods\FeiyuAutoJoin\`。
+两步完全复刻游戏自己的代码路径：
+
+```csharp
+// ① 连接（= CoopMenu.enterIPPressed 里那行，address 空时就是 localhost）
+var client = Game1.Multiplayer.InitClient(new LidgrenClient("127.0.0.1"));
+((TitleMenu)Game1.activeClickableMenu).ForceSubmenu(new FarmhandMenu(client));
+
+// ② 选角色（= LoadGameMenu.receiveLeftClick 里的 MenuSlots[i].Activate()）
+slots[idx].Activate();
+```
+
+环境变量（由 `start-fish.bat` 带入）：
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `FEIYU_AUTOJOIN` | 开 | `0` 关闭 |
+| `FEIYU_HOST` | `127.0.0.1` | 主持局域网地址，Lidgren **UDP 24642** |
+| `FEIYU_FARMHAND` | `泡泡今天也要好好吃` | 要自动选的角色名（中文别写进 .bat，走 mod 默认值防乱码） |
+
+逻辑：标题页等 ~2.5s（splash 结束）→ 连接 → 每帧看 `client.availableFarmhands`，名字对上就 Activate；
+断线回标题页会**自动重连**；连了 60s 没进世界就断开重来。
+
+### 41.3 实测（2026-11-05 09:16，全程零点击）
+```
+09:16:22  启动客户端
+09:16:37  正在连接 127.0.0.1:24642 ...
+09:16:38  (刚连上时名单是一串 Name 为空的占位 Farmer → 这次判"没对上", 断开重来)
+09:16:53  自动选角色: 泡泡今天也要好好吃 (index 0)
+09:16:55  Context: loaded save '_452739119', starting fall 24 Y3 ... Farmhand with 2 players online
+```
+从双击到进图约 **30 秒**（第一次连接必然空跑一轮，15 秒后第二次就成），期间没有任何鼠标键盘操作。
+
+### 41.4 编译 & 踩坑
+```powershell
+cd D:\StardewAI\mods\FeiyuAutoJoin
+dotnet build -c Release -p:GamePath="G:\量化系统安装包\V1.6.15-fish"
+# 游戏在跑时 dll 被占用 → 必须先关 farmhand 客户端再复制
+```
+- `Game1.multiplayer` 是 `protected internal`，mod 里不能用 → 用公开属性 **`Game1.Multiplayer`**。
+- `SaveFileSlot` / `MenuSlot` 是 **`LoadGameMenu` 的嵌套类** → `LoadGameMenu.SaveFileSlot`。
+- **刚连上时 `client.availableFarmhands` 是一串 Name 为空的占位 Farmer**（不是 null、也不是空列表），
+  所以第一次连接基本都会空跑一轮；把它当"没对上"→ 15 秒后自动重连就能拿到真名单。
+  （想省掉这一轮的话：把"名字全为空"单独判成"继续等"而不是"没这个人"。）
+- 菜单的 `MenuSlots` 在加载中可能为空或有占位，**以 `client.availableFarmhands` 的顺序为准按下标激活**（两者同序）。
+- `.ps1` 里写中文会被 PowerShell 5.1 按 ANSI 读 → 字符串终止符报错。**运维脚本一律纯 ASCII**（`restart-fish.ps1` 就是），
+  中文路径用通配符 `Get-Item 'G:\*\V1.6.15-fish'` 解析。
+- 一个 mod 的 dll 被运行中的游戏加载后无法覆盖（Device or resource busy）→ 部署顺序永远是：关客户端 → 复制 → 启动。
+
+### 40.5 补充：换日卡菜单先用 `/menu_close`，别急着重启 (2026-11-05 09:24 实测)
+
+**症状**：换日后两端都停在 `t=600` 不动，`/state` 里 `player.isInBed=true`，`activeMenu=ShippingMenu`，
+`/settlement_confirm` 返回 `ok:true` 但菜单**不消失**；再连发几次后所有主线程端点开始超时（队列堵死）。
+
+**真正卡住的不是 ShippingMenu**：`/menu_close` 的返回把它暴露了 ——
+```
+POST /menu_close → {"ok":true,"closed":true,"menu":"ReadyCheckDialog"}
+```
+`/menu` 报的是 `ShippingMenu`，实际盖在最上面的是 **ReadyCheckDialog**（睡觉 ready 确认框）。
+`/settlement_confirm` 只点 ShippingMenu 的 okButton，点不到这层，所以点了等于没点。
+
+**处置顺序（照这个来，能省一次重启）**：
+1. `POST /menu_close`（**两端都发**，主持 7842 也要发 —— 换日是双端同步的，关一头不动）；
+2. 关完重读 `/state`，看 `timeOfDay` 是否开始走（600 → 610 就说明活了）；
+3. 只有 `/menu_close` 本身也超时（主线程队列已堵死）时，才走 §40.3 重启 farmhand。
+
+**本次实测**：7842 `/menu_close` → `{"closed":true,"menu":"ReadyCheckDialog"}` → `t` 立刻 600→610；
+7843 再发一条 → `{"closed":false,"reason":"no menu"}`（跟着一起解开了），`isInBed` 转 false。
+全程未重启，约 20 秒解决。
+
+**踩坑提醒**：
+- `/menu` 报的 `type` 可能是**被盖住的那一层**，别只信它；`/menu_close` 的返回值里带的 `menu` 字段才是真·顶层。
+- 换日卡住时**主持端也会一起卡**，只修 farmhand 那头没用。
+
+## 四十二、day-loop 跨天空转：钓鱼循环缺"日期边界" (2026-11-05 实锤)
+
+### 42.1 症状
+- Day28 早上 7:20，主持**还躺在床上**（`FarmHouse 9,9`、`isInBed=true`、体力 270），钱正常到账。
+- day-loop 进程活着（心跳在更新锁文件）、CPU 很低，但日志停在 `10:03:31 弹菜单 ShippingMenu → 关` 一动不动。
+- 期间它每 20 秒还在关 `GameMenu`（`10:05:12 弹菜单 GameMenu → 关`），说明循环在跑，只是**永远不满足退出条件**。
+
+### 42.2 真因
+两条政策阈值打架 + 缺日期边界：
+- `host-night-guard.mjs` 的兜底是 **体力<20 或 时间≥23:30** 就送睡（安全网，比 day-loop 更早）；
+- day-loop 的钓鱼循环只在 **`timeOfDay>=2300` 或 `stamina<15`** 时退出。
+- 昨晚 22:30 体力 18 → **guard 先把主持送睡** → 换天到 Day28 6:00，体力回满 270、时间回到 6xx
+  → 钓鱼循环的**两个退出条件同时失效**，而循环体里没有别的出口，于是空转一整天（fishbot 对着床钓空气）。
+
+### 42.3 修法
+钓鱼循环里补一条跨天出口（`D:/StardewAI/day-loop.mjs`）：
+```js
+let s = await st();
+if (s.time.dayOfMonth !== day) {          // 跨天必须立刻退出钓鱼段
+  log('天已经翻了(Day' + s.time.dayOfMonth + '), 退出钓鱼段(防跨天空转)');
+  await fishbotSet(false).catch(() => { });
+  return s;                                // 直接进主循环的下一日
+}
+```
+
+### 42.4 教训（写循环时要照做）
+- **任何"按时间/体力判断收工"的长循环，必须再加一条日期边界**：`dayOfMonth !== day` 就退出。
+  换天会把时间和体力同时重置，只有日期是单调的。
+- 别只看"进程还活着/日志还在写"就判定健康——**要看它有没有在推进**（时间、体力、钱、背包至少一项在变）。
+- 兜底守卫的阈值（<20）和政策阈值（<15）不一致时，先动的是守卫；要么统一阈值，要么给主循环补边界（本次选了后者，守卫留作安全网）。
+
+## 四十三、换日触发器 newday-trigger：每天新的一天自动激活两边会话 (2026-11-05)
+
+### 43.1 要解决什么
+用户要「每次星露谷新的一天开始，都自动把主持和鱼鱼两边激活」。此前只有 `day-activator.mjs`
+单向给鱼鱼发简报；主持侧全靠我脑子里记着，换日卡菜单/赖床都要等下一次巡检才修（5 分钟起步）。
+
+### 43.2 「激活我的会话」怎么落地（2026-11-05 晚修正）
+ZCode 有两条“往会话里塞消息”的路子：
+- **定时任务（automation）**：桌面端调度器轮询 `tasks-index.sqlite`，到点把 automation 的 `prompt`
+  作为 user turn 投进它绑定的 task。5 分钟巡检就是这么来的。
+- CLI `zcode --resume <session> -p "..."`：能跑，但对正在被桌面端持有的会话并发写有风险，不采用。
+
+本会话已经绑了一条巡检自动化，`CronCreate` 会直接报
+`Cannot create a scheduled task inside a session that already belongs to a scheduled task`。
+但调度器读的是库，不是内存——它认两种 run：
+```sql
+-- 定时触发
+SELECT * FROM automations WHERE enabled=1 AND running=0 AND next_run_at<=now;
+-- 手动触发（runNow 按钮走这条）
+SELECT ... FROM automation_runs r JOIN automations a ON a.automation_id=r.automation_id
+ WHERE r.trigger='manual' AND r.dispatch_status='claimed' AND a.running=0
+   AND (r.attempts=0 OR r.updated_at<=@stale);
+```
+所以 `newday-bell.py` 直接维护一条专属 automation（`automation-7c1f4e2a-…`，cron 占位每年 1/1 04:00，
+永不指望它自己到点），每次换日插一条 `trigger='manual' / dispatch_status='claimed'` 的 run。
+桌面端 20 秒内认领，把 prompt「🌅 星露谷新的一天开始了」投进本会话 —— **这才是用户要的“定时任务通道”**。
+
+`newday-pending.json` 和留言板 `day-trigger→肥鱼` 继续保留，作为通道失败时的双保险和记录。
+
+鱼鱼那边仍走留言板 `from=肥鱼 to=小肥鱼`（她的管家/fish-eye 读），首行同样是「🌅 新的一天开始了」。
+
+### 43.3 做了什么（`D:/StardewAI/newday-trigger.mjs`）
+| 能力 | 规则 |
+|---|---|
+| 换日检测 | 每 20s 轮询 7842/7843 `/state`，key = `年\|季节\|日`；**两端各自比对**（她晚进/重连也补发） |
+| 换日当场 | ① 关换日菜单（ShippingMenu/ReadyCheckDialog，最多 3 次）② 落 pending ③ **`ringSession()` 走定时任务通道把「🌅 新的一天开始了」投进主持会话** ④ 发简报 ⑤ 记 lastKey |
+| 早晨赖床 | `isInBed && 610 ≤ t < 1200` → `POST 7843/wakeup`；同一游戏日最多 3 次、间隔 2 分钟。**只对 7843，7842 绝不** |
+| 卡死哨兵 | `timeOfDay` ≥4 分钟不动 **且** 顶上是睡觉/结算菜单 → 两端 `/menu_close`（只认这个签名，别的不碰） |
+| 调试 | `GET 127.0.0.1:7861/status`（含 `tickCount` / `lastTickAt` 心跳）、`POST /force`（清 key 重放当天） |
+| 状态 | `newday-state.json`（重启不重复发） |
+
+### 43.4 常驻方式
+- 启动文件夹：`stardew-newday-trigger.vbs`（隐藏窗口跑 `node newday-trigger.mjs`）
+- 旧的 `stardew-day-activator.vbs` 已改名 `.vbs.disabled`（不删，留档）
+- 手动起：`powershell -NoProfile -Command "Start-Process node -ArgumentList 'D:/StardewAI/newday-trigger.mjs' -WorkingDirectory 'D:/StardewAI' -WindowStyle Hidden"`
+- ⚠️ **开机自启只管开机**：进程要是中途崩了，本次登录内不会自己回来。
+  巡检发现 `/status` 连不上但游戏还在跑 → 手动重启（state 已落盘，不会重复发简报）。
+
+### 43.5 实测（2026-11-05 10:21，冬2）
+```
+[11-05T02:21:57] newday-trigger 启动, 每 20s 盯两端换日 (上次 host=null fish=null)
+[11-05T02:21:58] 主持换日 冬2日 第3年 → pending 已落盘, 留言#167
+[11-05T02:21:58] 鱼鱼换日 冬2日 第3年 → 简报已发 留言#168
+```
+重启后 `上次 host=3|winter|2 fish=3|winter|2` → 不重复发。
+
+### 43.6 踩坑
+- **`curl -X POST` 不带 body 会 411 Length Required**（桥要 Content-Length）：必须 `-d ''`。
+- **换日 key 必须带 season**：秋28 → 冬1 只比 `dayOfMonth` 会漏掉整个换季。
+- **赖床修复要加早晨窗口**：她晚上主动睡觉时 `isInBed` 也是 true，无条件 `/wakeup` 会把人从床上拽下来。
+- **判"时间有没有走"按 `timeOfDay`**，不要按墙钟——挂机时代码在跑但游戏时间可以完全不动。
+- **日志没有新行 ≠ 卡死**：一切正常时只在换日/救火时写日志，几小时零输出是常态。
+  判活看 `/status` 的 `tickCount`/`lastTickAt`（20s 一跳），别翻日志。
+- **Git Bash 的 curl 带中文 query 会查不到留言**（参数按本地码页编码，`to=肥鱼` 与库里 UTF-8 对不上，返回空 `msgs`）。
+  查留言板用 node：`fetch('http://localhost:7850/messages?to='+encodeURIComponent('肥鱼')+'&since=0')`。
+- 2026-11-05 10:19 那次冬1换日就是 §40.5 的死锁现场：两端 t=600 + ShippingMenu，
+  `day-loop` 贴床超时退出。手动两端 `/menu_close` 后 t 立刻 600→810。触发器现在会在换日当场就做这件事。
+
+### 43.7 定时任务通道（`newday-bell.py`）——2026-11-05 晚接上的真·唤醒
+实现：直接在 `C:/Users/Administrator/.zcode/v2/tasks-index.sqlite` 里维护一条专属 automation
+（`automation-7c1f4e2a-9b3d-5a86-b2e0-4d5f6a7c8b91`），每次换日插一条 manual run。关键字段：
+- `automation_runs`: `trigger='manual'`, `dispatch_status='claimed'`, **`attempts=0`**,
+  `scheduled_at=created_at=updated_at=now`, `run_id='<automation_id>:manual:<uuid>'`
+- 对应 `automations` 必须 `enabled=1`, `lifecycle_status='active'`, `running=0`
+- automation 本体：`cron_expr='0 4 1 1 *'`（占位）、`target_task_id=session_1fa308cc…`（主持会话）、
+  `mode='yolo'`、`schedule_rule=NULL`、`next_run_at` 设到明年 1/1（不会被定时触发）
+
+用法：
+```bash
+python D:/StardewAI/newday-bell.py            # 确保 automation 存在 + 投一条 manual run
+python D:/StardewAI/newday-bell.py --dry-run  # 只建 automation, 不投
+python D:/StardewAI/newday-bell.py --status   # 只读
+```
+`newday-trigger.mjs` 的 `onHostNewDay()` 里 `await ringSession()` 调它；投递失败只记日志，不影响
+pending/留言板两条老通道。
+
+**踩坑（都是实测）**：
+- `CronCreate` 在本会话会报 "session already belongs to a scheduled task" —— 一个会话只允许一条定时任务，
+  所以只能直接写库（写库前先确认 schema 没变，升级 ZCode 后要复核）。
+- **`attempts` 必须写 0**。照 UI 的 runNow 写 1 会命中 `(attempts=0 OR updated_at<=stale)` 的 stale 分支，
+  要等 ~10 分钟才会被认领（我第一次就是这么卡住的）。
+- automation 的 `running=1` 时新 run 会被跳过（脚本返回 `note='上一次投递还在跑'`）；
+  `claimed_at>10min` 的残留在下一次投递时自动清。
+- 端到端实测：11:02:05 插 run → 11:02:11 `dispatch_status='dispatched'`, `outcome='running'`,
+  `session_id=session_1fa308cc…`；真正的 user turn 是走 `session_input` 队列（`delivery='queue'`,
+  `status='admitted'`），要等当前这轮结束才 promoted。**所以"run 一直是 running"不等于失败**，
+  先看 `~/.zcode/cli/db/db.sqlite` 的 `session_input` 里它是不是还排在队里。
+- 队列是**按顺序一轮一条**：前面压着一条巡检时，换日消息会排它后面（实测 11:02 的换日消息排在
+  10:58 巡检之后）。游戏内一天≈13 分钟，一般等一两轮就轮到，不用重发。
+- **桌面端不给 manual run 收尾**：消息都投递并跑完了，`automation_runs.outcome` 仍停在 `'running'`、
+  `automations.running` 一直是 1（`claimed_at` 还在心跳）。所以 `newday-bell.py` 自己按
+  `run.updated_at` 做 8 分钟超时自愈（标 `outcome='stale'` + `running=0`），否则第二天的新消息会被永久挡住。
+- 跑一轮会占一次模型调用。游戏内一天≈13 分钟真实时间，也就是最多约 4~5 次/小时；
+  比 5 分钟巡检（12 次/小时）便宜，但仍要算钱，调试时别手动狂插。
+
+## 四十四、冬季钓鱼日历（2026-11-05 用户点名：鱼鱼这个冬天要钓鱼，主持要陪）
+
+### 44.1 日程表
+| 游戏日 | 活动 | 时间 | 地点 | 一句话 |
+|---|---|---|---|---|
+| 冬 8 | **冰雪节**（冰钓比赛） | 09:00–14:00 | 煤矿森林 | 钓满 5 条赢威利；只有森林池塘计入 |
+| 冬 12–13 | **鱿鱼节** | 06:10 起全天 | 沙滩 | 鱿鱼全天可钓，按条数兑铜/铁/金/铱奖 |
+| 冬 15–17 | **夜市** | 17:00–02:00 | 沙滩 | 潜艇 23:00 前入场，深海鱼 |
+
+`newday-trigger.mjs` 里已经内置 `WINTER_EVENTS` 表：活动日会在给我和鱼鱼的每日简报里自动带出，并在 `newday-pending.json` 的 todo 里标"今天是活动日"。
+
+### 44.2 冰雪节（冬 8）——细节来自游戏本体 `Data/Festivals/winter8`
+- 入口条件写在脚本里：`conditions = Forest/900 1400` → **9:00 前煤矿森林进不去**，14:00 后也进不去。
+- 进去以后换临时地图 `Forest-IceFestival`，所有玩家被 warp 到 (71,35) 附近；**不是**能直接 `/warp` 过去的普通地图。
+- 比赛规则：**钓满 5 条鱼**才赢威利，否则威利赢；只有**森林池塘**里的鱼计入，旁边河里钓的不算。
+- 判奖：找 Lewis 完成裁判 → 脚本 `afterIceFishing` 里是 `waitForOtherPlayers endContest`，**多人要等另一个人**，别一个人先跑。
+- 首次获胜奖励：Barbed Hook（倒刺钩）+ Dressed Spinner（精装旋式鱼饵）+ Magnet（磁铁）+ Sailor's Cap（水手帽）；不是第一次赢 → 一张 Prize Ticket。**多人：所有获胜玩家都给奖励**。
+- 节日结束自动回农场，时间直接变 22:00；当天全村的商店和住宅都锁。
+- 抛竿：冰洞很小，站到洞边、用最小力度抛最稳。
+
+### 44.3 鱿鱼节（冬 12–13）
+- 沙滩，06:10 开始，**全天**；商店不关门、时间照走、动物照喂（`Data/Festivals/winter12|13` 查不到 = 不是节日地图，是代码里的 mini festival）。
+- 鱿鱼平时只在晚上出，节日水里放了特殊鱼饵 → **白天也能钓**。
+- 兑奖档位（**每天重置**，摊位左侧牌子）：
+  - 冬 12：1 铜（高级鱼饵×20）/ 3 铁（海之菜肴 + 冬季种子×10 或 谜之盒×2）/ 5 金（珍珠 + 咖啡×3）/ **8 铱**（《鱿鱼娃》挂画；没拿过捕蟹秘籍就给书，否则 3 谜之盒 + 海泡布丁）
+  - 冬 13：2 铜（Trap Bobber）/ 5 铁 / 7 金（宝箱 + 三倍浓缩咖啡×3）/ **10 铱**（鱿鱼帽）
+- 准备：鱼饵制造机提前做鱿鱼饵；**沙滩提前放箱子**能大幅缓解背包压力，节后也不会被清掉。
+- 目标：两天各打满 8 只 / 10 只（铱档）。
+
+### 44.4 夜市（冬 15–17）
+- 沙滩 17:00–02:00；**潜艇 23:00 后不能进**，美人鱼船 00:30 后不能进。
+- 潜艇 1000g/人，下去是深海鱼场（水滴鱼/幽灵鱼/午夜鱿鱼那批），一次约 30 游戏分钟。
+- 商店不关、时间照走、动物照喂；沙漠商人每天送一杯免费咖啡。
+- 画商卢皮尼每天卖不同的画（1200g，三年一循环）。
+
+### 44.5 现在就能做的准备
+- 鱼鱼还是**竹竿**（不能挂饵/渔具，钓鱼 2 级）。冬 8 前建议她去 Willy 那儿升级玻璃纤维棒（1800g，需钓鱼 2 级）——**要不要买由她定，我不动她的角色**。
+- 主持：玻璃纤维棒 + 高级鱼饵×40，钓鱿鱼/深海够用；钱 5.5 万，潜艇票不心疼。
+- 背包留空：节日和夜市都在外面，背包满会卡拾取。
+
+### 44.6 执行方式与风险
+- 端点：`/festival`（看当前节日事件）、`/festival/answer {answer:N}`（选第 N 个对话项）、`/festival/interact`（节日里交互）、`/festival_data?season=winter&day=8`（读节日脚本）。
+- 入场靠**走到 Forest 触发**（9:00 后），不是 warp 到临时地图。
+- 活动日巡检动作：**停掉 day-loop 的钓鱼段**，主持改为陪玩；活动结束（22:00 回农场）再恢复日常。
+- 已知风险：换日卡菜单（§40.5，触发器已自动清）、背包满、冰雪节 14:00 硬截止。
+
+## 四十五、sleep ready 会挂一整天：鱼鱼先睡 = 主持的一天提前结束 (2026-11-05 实测)
+
+### 45.1 现象
+冬2 22:40，主持在海滩钓鱼（体力 64，原计划钓到 23:00）：
+```
+10:31:43 host t=2310 Beach(44,35) inBed=false  sleepReady=Locked  (ready_state: sleep 2/2 Locked)
+10:31:51 host t=2320 FarmHouse(3,11)          ← 被瞬移回屋
+10:32:00 host t=600  冬3 inBed=true ShippingMenu
+```
+鱼鱼 21:30 后上床 → 团队 `sleep` 就绪数变成 2/2 → **不管主持在不在床上，直接换日**。
+
+### 45.2 根因
+- 主持的 `sleepReady` 在早上那次（失败的）`/sleep` 里被置 `true`，之后**一整天没被清**。
+- `/cancel_sleep` 只把 `isInBed` 置 false + 关 ReadyCheckDialog（反编译 `HandleCancelSleep` 确认），
+  **不动 `Game1.netReady` 的 "sleep" 通道**。所以 ready 会一直挂着。
+- 只要同伴（鱼鱼）一 ready，`numberReady` 就是 2/2，换日立刻发生。
+
+### 45.3 影响 / 不算问题的地方
+- 主持的"体力<15 或 23:00 收工"政策实际失效：**鱼鱼的上床时间才是主持的收工时间**。
+- 换日不扣体力（次日仍是 270 满），也不触发 "passed out" 罚金。
+- day-loop 靠 §42 的日期边界正常退出，10:32:04 已自动开新一天（查信→浇水 0→去海滩→fishbot ON）。
+
+### 45.4 现状处置
+接受（当作"两人一起作息"）。换日瞬间的 ShippingMenu 由 `newday-trigger` 自动清掉，不用人管。
+
+### 45.5 想根治的话
+需要能执行 `Game1.netReady.SetLocalReady("sleep", false)` 的端点：
+- 现有 NagiBridgeRemix 没暴露这个能力（`/ready_state` 只读）；
+- 只有反编译 dump（`D:/StardewAI/dll-audit/NagiBridgeRemix.decompiled.cs`），重建整个 mod 成本高；
+- 更省的办法是照 `FeiyuAutoJoin` 的路子再写一个小 mod（net6.0 + 一个本地 HTTP 口），只做"清 ready"这一件事。
+
+---
+
+## 四十六、/sleep 返回 ok ≠ 存档：连续 6 天没写盘 (2026-11-06 事故)
+
+### 46.1 现象
+- 冬3~冬8 每天 `day-loop` 都调 `/sleep`，返回 `{"ok":true,"action":"sleeping"}`，换日也正常（冬3→…→冬8）。
+- 但 `C:/Users/Administrator/AppData/Roaming/StardewValley/Saves/肥鱼肥鱼_452739119/SaveGameInfo`
+  的 mtime 一直停在 **冬2 10:19:07**。
+- 冬8 冰雪节卡死后重读存档，直接回到 **冬2 6:00**，冬3~冬8 的进度全丢（钱 64746→55470、鱼获、鱼鱼的物品全没了）。
+
+### 46.2 根因
+原 `day-loop` 的睡前顺序是：
+1. `POST 7843/sleep`（叫鱼鱼先睡）
+2. 等 6 秒
+3. `POST 7842/sleep`（主持后睡）
+
+而主持的 `sleep` ready 会从前一晚一直挂到第二天（§45 的 `SetLocalReady` 不清除问题）。
+**鱼鱼一睡，团队 ready 立刻 2/2 → 换日**，主持自己的睡眠/存档流程根本没跑 → 不写盘。
+`/sleep` 的 `ok:true` 只代表"已经上床+置 ready"，不代表游戏完成了 NewDay/Save。
+
+### 46.3 修复（2026-11-06 已落地）
+1. **顺序反转**：`day-loop` 先让主持 `/sleep`（真实睡眠+ready），等 4 秒，再叫鱼鱼睡。
+2. **存档校验**：换日后读 `SaveGameInfo` mtime，必须大于睡前记录的 mtime；
+   日志打 `✓ 已存档 HH:MM:SS` 或 `⚠️ 存档没写盘! 本条要查`。
+3. **换日简报带存档年龄**：`newday-trigger` 的每日简报新增 `存档: ✓ N 分钟前写盘` / `⚠️ N 分钟前(可能没写!)`，
+   并写进 `newday-pending.json` 的 `saveAgeMin`。
+4. **校准**：主持单人 `/sleep` 实测 12:29:41 → mtime **12:29:47**、冬3 6:00 —— 证明 `/sleep` 本身能存，
+   问题只在"谁先睡"的顺序。
+
+### 46.4 铁律①补充
+> 每天 `/sleep` 存档 = **必须以存档文件 mtime 前进为准**，不许只看接口返回 `ok:true`。
+> 存档路径：`%APPDATA%/StardewValley/Saves/肥鱼肥鱼_452739119/SaveGameInfo`。
+
+### 46.5 更正 (2026-11-05 13:10)：真凶不是"谁先睡"，是 newday-trigger 把 ShippingMenu 关掉了
+
+反编译 `Menus.ShippingMenu.update()` 确认：结算菜单自己持一个 `saveGameMenu`，
+**必须等结算动画走完才 `new SaveGameMenu()` 真正写盘**；`/menu_close` 把 ShippingMenu
+从 `activeClickableMenu` 摘掉 → SaveGameMenu 永远不创建 → 这一天不写盘。
+
+`newday-trigger` 换日时调 `closeStaleMenus()`，而 `STALE_MENUS = {ShippingMenu, ReadyCheckDialog}`，
+所以每个换日瞬间它都把 ShippingMenu 关掉 —— 这才是冬3~冬8 六天没写盘的真正原因
+（12:29:47 那次能存，是因为触发器当时刚被杀掉、还没重启：`03:54:24 newday-trigger 启动` 晚于 `12:29:47`）。
+
+**已修**：换日菜单分三档处置（`settleNewDayMenus()`）：
+
+| 菜单 | 动作 |
+|---|---|
+| ReadyCheckDialog | `/menu_close`（睡觉 ready 死锁，关掉安全）|
+| ShippingMenu | `/settlement_confirm` 点 OK → outro → SaveGameMenu → 写盘 |
+| SaveGameMenu | 只等不碰（正在写）|
+
+`host-night-guard` 同时改成"换日后等 mtime 前进（最长 90s）再快照"，且睡觉顺序统一成
+"主持先睡、4s 后叫鱼鱼"；`newday-trigger` 换日日志新增 `换日收尾: 存档: ✓ N 分钟前写盘`。
+
+---
+
+## 四十七、farmhand 卡"正在连接" = 主持读档读成了单人模式 (2026-11-05)
+
+### 47.1 现象
+- 鱼鱼客户端日志反复：`FeiyuAutoJoin 正在连接 127.0.0.1:24642 ...` → 60 秒超时 → 重试；
+  游戏画面停在"正在连接"。
+- 主持 `/state` 正常、时间在走、能钓鱼 —— 看起来一切正常。
+
+### 47.2 判定（两条硬证据）
+1. 主持 SMAPI 日志加载存档那行写的是 **`Single-player.`**（不是 `Host in a multiplayer game`）；
+2. 主持进程 **没有任何 UDP socket**（`Get-NetUDPEndpoint -OwningProcess <host pid>` 为空），
+   且 `127.0.0.1:24642` 的 UDP 探测被 ICMP refused —— 服务器根本没起。
+
+### 47.3 根因
+`FeiyuAutoLoad` 在标题页直接调 `SaveGame.Load(存档名)`，这条路径等价"单人读档"，
+`Game1.multiplayerMode` 保持 0 → 不初始化 `LidgrenServer` → 不监听 24642。
+原版进合作模式必须走 `CoopMenu.HostFileSlot.Activate()`：
+```csharp
+Game1.multiplayerMode = (byte)(_multiplayer ? 2 : 0);  // 2 = 主持
+base.Activate();                                        // 内部 SaveGame.Load(...)
+```
+（反编译 `StardewValley.Menus.CoopMenu` 确认；`Game1.IsServer => multiplayerMode == 2`。）
+
+### 47.4 修复（已落地，FeiyuAutoLoad v1.5+）
+`ModEntry.OnTick()` 读档前加一行：
+```csharp
+if (AutoHost) Game1.multiplayerMode = 2;   // AutoHost = 环境变量 FEIYU_HOSTING != "0"
+SaveGame.Load(save);
+```
+- 编译：`cd D:\StardewAI\FeiyuAutoLoad && dotnet build -c Release`；
+- 部署前必须先关主持（否则 dll 被占用：`Device or resource busy`）；
+- 部署：复制 `bin\Release\net6.0\FeiyuAutoLoad.dll` 到 `Mods\FeiyuAutoLoad\`。
+- 验证：日志出现 `自动读档 ... (主持模式=True)`，鱼鱼客户端 ~1 分钟内自动选角色进图。
+
+⚠️ 重启主持时**不要同时启动两个实例**（`cmd start` 与 `Start-Process` 各来一次会双开抢同一个存档）。
+
+## 四十八、定时任务通道一天投两次"新的一天" = tick 重入 (2026-11-05)
+
+**现象**：同一天连续收到两条「🌅 星露谷新的一天开始了」，`automation_runs` 里同一换日有两条 manual run（13:26:47 / 13:26:52）。
+
+**根因**：`newday-trigger` 的 `tick()` 里有 `await settleNewDayMenus()`（最长 ~25s）+ `ringSession()`（python 起进程），
+总耗时可能超过 20s 轮询间隔；`setInterval` 不等上一轮结束就发下一轮，两轮都看到 `hk !== st.hostKey`（key 还没更新），
+于是同一换日处理两遍 → 投递两次、留言重复。
+
+**已修**：`guardedTick()` 互斥标志——`ticking===true` 时直接跳过本轮；`.finally()` 复位。
+
+**铁律⑥补充**：换日处理类脚本（有长 await 的轮询）必须加"上一轮未完成则跳过"的互斥，
+否则长耗时轮次会和下一轮重叠，产生重复投递/重复留言。
+
+## 四十九、换日存档死锁：农工的升级菜单堵住"所有玩家 ready" (2026-11-06 冬7 晨实锤)
+
+**现象**：冬6→冬7 换日时，主持 SMAPI 日志停在 `Context: before save.`，之后 10 分钟零输出；
+`SaveGameInfo` mtime 不动（停在 13:40:19），存档目录里**连 `_STARDEWVALLEYSAVETMP` 临时文件都没建**；
+两端 `/state` 正常返回，但主持任何主线程端点（`/face`、`/settlement_confirm`）都超时。
+
+**反编译定案**（`StardewValley.Menus.SaveGameMenu.update()` + SMAPI `Context.IsSaving()`）：
+```csharp
+if (Game1.IsMasterGame) {
+    if (Game1.saveOnNewDay) {
+        Game1.player.team.endOfNightStatus.UpdateState("ready");
+        if (Game1.newDaySync.readyForSave()) {   // ← 等所有玩家 ready
+            Game1.multiplayer.saveFarmhands();
+            Game1.game1.IsSaving = true;
+            loader = SaveGame.Save();            // ← 写盘从这里才开始
+        }
+    }
+}
+```
+`newDaySync.readyForSave()` 要等**农工也 ready**。鱼鱼 13:53:11 弹了升级菜单（钓鱼 5 级：渔夫/捕猎者），
+客户端停在模态 `LevelUpMenu` 里发不出 ready → 主持永远进不了 `SaveGame.Save()`：
+- 因为 `ShippingMenu.saveGameMenu != null && savedYet == false`，SMAPI 的 `Context.IsSaving()` 判为"正在存档"，
+  于是不再发表 mod 的 `UpdateTicked` 事件（`FeiyuAutoLoad` 的 TDiag 每 10s 一行**突然断掉就是这个原因**，不是进程卡死）；
+- `loader == null` → 不产生临时文件、不写盘。
+
+**解开**：14:01 night-guard 的赖床破环把鱼鱼的菜单关掉 → 14:03 触发器替她点结算 OK → 她的客户端补发 ready
+→ 主持 14:03:20 写盘完成（`after save, starting winter 7 Y3`）。整段 **10 分钟**。
+
+**已修（三处）**：
+1. `newday-trigger.mjs`：`STALE_MENUS` 加入 `LevelUpMenu`；`settleNewDayMenus()` 新增分支
+   `LevelUpMenu → /menu_close`（强关时游戏会默认落到某个专精；想换专精去下水道「不确定性雕像」10k 重选）。
+2. `fish-fishbot.mjs`：keeper 每轮检查 `activeMenu.type === 'LevelUpMenu'` 当场强关，
+   **不让升级菜单留到换日**（这是根治点：升级通常发生在钓鱼途中，离换日还有几小时）。
+3. `day-loop.mjs`：晨间下床从 `/wakeup` 改为 `/warp Farm 64,15` —— 主持(7842) **严禁** `/wakeup`。
+
+**判据（以后一眼认出）**：
+- `before save.` 之后超过 90s 没有 `after save`；
+- 存档目录没有 `*_STARDEWVALLEYSAVETMP`；
+- TDiag 断流但进程 `Responding=True`、`/state` 还能读（HTTP 线程在跑，主线程只是"游戏内暂停更新"）。
+→ 一定是某个玩家的模态菜单挡了 ready，先看两端 `activeMenu`，优先关**农工**的升级/结算菜单。
+
+## 五十、夜间守卫的"90s 内没写盘"误报 = mtime 基线取晚了 (2026-11-06 修)
+
+**现象**：`host-night-guard.log` 每晚换日后打一条 `⚠️ 90s 内没写盘!`，但存档 mtime 与主存档日期都对得上（冬9 实况：14:50:30 触发睡觉 → 14:50:36 写盘 → 14:51:24 守卫「✓ 新一天 Day9」→ 14:52:54 却报没写盘）。
+
+**根因**：旧代码每轮循环末尾都 `lastSaveMtime = saveMtime()`。而 `/sleep` 分支里先 `sleep(4000)` 再 `sleep(30000)`，**这 30 秒里换日+写盘已经发生**，于是基线被刷成"写盘之后"的 mtime；下一轮检测到换日时再拿它当 before，自然永远等不到"前进"。
+
+**已修**：改成只记录"已验收通过的那次写盘" `verifiedSaveMtime`：
+- 换日时判据 = `saveMtime() > verifiedSaveMtime`（与采样在写盘前/后无关）；
+- 只有判定成功才把 `verifiedSaveMtime` 推进；失败保持旧值，下一晚仍能正确比较。
+- 循环末尾不再刷基线。
+
+**判真伪的老规矩不变**：`SaveGameInfo` 绝对 mtime + 主存档 XML 里的 `<currentSeason>/<dayOfMonth>` + 触发器日志里 ShippingMenu 走的是 `settlement_confirmed`。
+
+## 五十一、用 mod `/sleep` 绕过结算菜单 → 换日不写盘 → 农工卡黑屏 (2026-11-06 冬10 事故)
+
+**现象**：为重置卡住的主持，用了 `POST 7842/sleep`（mod 的 warp 到床 + `answerDialogueAction("Sleep_Yes")` + `netReady.SetLocalReady("sleep")`）。
+主持确实上床了、换日也发生了（冬11 t=600），但：
+- SMAPI 主持日志只有 `Synchronizing 'NewDay' task...`，**没有 `Context: before save`**；
+- `SaveGameInfo` mtime 不前进；
+- 鱼鱼客户端显示 `SaveGameMenu` + **黑屏**，一直等主持写盘（`newDaySync.hasSaved()` 永远 false）；
+- 主持侧 `ReadyCheckDialog(sleep) 1/2` 等鱼鱼 ready，鱼鱼卡在 SaveGameMenu → 互相等死。
+
+**根因**：正常换日存档链是 `ShippingMenu`（过夜结算）→ 它自己 `new SaveGameMenu()` → 写盘。
+用 mod 的 `/sleep` 直接把玩家置为"睡好"，跳过了结算菜单这一环，`SaveGameMenu` 从未创建 → 主玩家侧不写盘 →
+农工侧的 `SaveGameMenu` 永远等不到 `hasSaved()` → 黑屏。
+
+**处置（已验证）**：只能重启两端（用户拍板）：
+1. 先停 `newday-trigger`（防止误报换日）；
+2. `Stop-Process` 两个 Stardew 进程（按 PID / exe 路径，绝不 `taskkill /IM`）；
+3. `Start-Process StardewModdingAPI.exe -WorkingDirectory <各自目录>` 先起主持，等 `/state.worldReady`（约 5s）；
+4. 再起鱼鱼，FeiyuAutoJoin 自动连回；
+5. 把 `newday-state.json` 的 `hostKey/fishKey` 改成读回的日期（否则触发器会把"回到旧日期"当新的一天播报）；
+6. 重启 `newday-trigger` / `day-loop` / `host-night-guard`（守卫的 lastDay 也是旧日期，必须重启）。
+代价：回到最近一次存档（本次是当天早上 6:00），当天白天的进度丢失。
+
+**铁律⑦（新增）**：**主持侧严禁用 mod `/sleep` 当"重置按钮"**。它只适合"确实要让这一天结束"的收尾；
+若只是想把人从床上弄下来，用 `/warp`。任何 sleep 之后必须看 `Context: before save` / `SaveGameInfo` mtime —— 没有写盘就是踩了这条。
+
+## 五十二、完整地图系统：不用把人送过去，也能画出任意一张图 (2026-11-05 鱼鱼"天天迷路")
+
+**需求**：鱼鱼原话「把游戏完整地图搞好，鱼鱼天天迷路」「本鱼没找着裁缝铺」。
+旧的 fish-eye 只有 22 个地标、还大半是"guess"，`/map` 只画她身边 41×17 的窗口，没走过的地方全是 `?`。
+
+**三个现成端点（反编译核实，全都不用移动角色）**：
+1. `GET /warps` → `EnsureWarpGraph()` 遍历 `Game1.locations` 全部 87 张图的 `location.warps`，
+   返回 `{maps:{地图:[{x,y,targetLocation,targetX,targetY}]}}` —— **全世界传送图**。
+2. `GET /tile_props?location=X&scan=Action` → 任意地图所有层的 Action 属性。
+   其中 `LockedDoorWarp <insX> <insY> <Interior> <open> <close>` 一条就给了：
+   **门外坐标 + 室内落点 + 营业时间**（例：Town(20,88) 是艾米丽家门，进去落在 HaleyHouse(2,24)，9:00-20:00）。
+   另外 `Buy General`/`Blacksmith`/`Carpenter`/`Tailoring`/`HospitalShop` 等就是柜台/缝纫机的**可交互格**。
+3. `GET /passable_rect?location=X&x1=&y1=&x2=&y2=` → 任意地图任意矩形的可行走格（单次上限 96×96，实测 ~70ms/次），
+   字段 `passable/hasFloor/object/terrain/largeTerrain/resource`。**整图骨架靠它**。
+
+**关键更正**：`/map` **不返回 tiles**，只有 `location{name,width,height}/warps/npcs/buildings/animals`。
+以前 `primeMap()` 以为能整图扫，其实一直在失败、退回"走一格记一格"（`fish-eye.log` 里的 `primeMap: /map 不可用`）。
+`/passable_rect` 才是正解 —— `fish-eye.mjs` 的 `stateAndTiles()` 已改为只更新 `seenCache` 的细信息（作物/水/机器覆盖层）。
+
+**落地（新文件 + 改动）**：
+- `D:/StardewAI/world-map.mjs`（新）：`warpsAll()` 全图传送表 / `doors(loc)` 解析 Action 门 /
+  `grid(loc)` 自适应分块扫整图（4 块够 130×110 的镇子）/ `renderWindow()` / `renderWhole()`（自动缩略）/
+  `routeHops()/routeText()`（BFS 跨图路线）/ `exitsOf(loc)`。全部 10 分钟缓存（建筑/人物会变）。
+- `fish-eye-lib.mjs`：`LANDMARKS` 22 → **63 条**，全部带真实坐标：
+  商店用"室内落点 + 门外坐标 + 营业时间 + 柜台格"，家/温室用 `building{bx,by}`（两间 Cabin 同名，只能靠农场坐标分辨）。
+  详见 `MAP_CN` / `AREA_ALIAS` / `hoursText()` / `openNow()` / `placesInMap()` / `placeLine()`。
+- `fish-eye.mjs` 三档地图：
+  - `地图` = 她身边 41×17（骨架 `/passable_rect`，再叠 `seenCache` 的作物/水/机器）+ 按距离编号的地标；
+  - `地图 <地点>` = 整张图缩略（不在那边也能看），标出所有门/柜台/出口 + 营业时间 + 跨图路线；
+    `地图 裁缝铺` 直接给 HaleyHouse 的户型图，标出 `裁缝机(13,23)`；
+  - `世界怎么走` = 全世界出口图。
+- `goto` 重写：①同图 `/walk_to` ②`building` → `/warp_building`（小屋/温室/农舍）③室内落点直传（商店/矿洞）
+  ④直传失败 → 门站兜底（`nearestStand()` 从可行走格找门前能站的格）⑤同图坐标兜底。
+  目标格站不住会自动找最近可站格；商店关门会在到达播报里提示。
+- 新命令：`出去`（`world.exitsOf` + 传送到门外图）、`XX在哪`（=去XX，会报门牌和营业时间）。
+
+**验收（冬13 实况）**：`去农田` 从 Farm(52,16) 走到 (65,19)；`去裁缝铺` 从 Farm 直接落到 HaleyHouse(2,24)、
+旁边 Haley/Emily；`地图` 在店内画出 25×30 户型并标出裁缝机；`出去` 回到 Town(20,89)；
+`地图 镇子` 整图 130×110 缩略 + 18 个门/出口编号；`地图 矿洞` 远程给 Mine 77×20。
+29 个室内落点 + 关键户外站位全部用 `/passable_rect` 逐格验证过可站。
+
+**判据**：以后她再迷路，先看 `地图 <她说的地方>` 的整图；要门牌说 `XX在哪`；跨图路线不对先查 `/warps`。
+
+## 五十三、⚠️ 双世界分裂：farmhand 启动用了单机读档，两边各跑一个存档 (2026-11-05 实锤)
+
+**现象**：15:24 两端各起一个 `StardewModdingAPI.exe`（主持 `V1.6.15`、鱼鱼 `V1.6.15-fish`）。
+40 分钟后发现：
+- 两端 `/state.player.name` **都是「蓝色小肥鱼」**（不是农工「泡泡今天也要好好吃」），
+  `homeLocation` 都是 `FarmHouse`、`homeDoor` 都是 Farm(64,14)；
+- `otherPlayers` 两端都是空；`/state.time` 同一天却差 6 小时（主持 12:20 / 鱼鱼 6:40）；
+- 钱不一样（112416 vs 103158）、`fishCaught` 不一样；
+- 存档目录 mtime 15:34（主持存冬11）→ 15:43（鱼鱼端存冬11）→ 15:55（鱼鱼端存冬12）**互相覆盖**。
+
+**根因**：鱼鱼端 `FeiyuAutoLoad` 在标题界面无条件 `SaveGame.Load(saveName)`（v1.5 逻辑），
+**它不知道自己是农工** —— 自动读档 = 以单人模式接管整份存档（玩的是主持角色）。
+正确路径是 `FEIYU_AUTOLOAD=0` + `FeiyuAutoJoin`（`FEIYU_AUTOJOIN=1`、`FEIYU_HOST=127.0.0.1`）去连主持的 UDP 24642。
+`G:\量化系统安装包\V1.6.15-fish\start-fish.bat` 就是干这个的（`restart-fish.ps1` 调它）；
+**手动/旧脚本直接起 exe = 单机分裂**。主持端 `V1.6.15` 的 FeiyuAutoLoad 有 `FEIYU_HOSTING` 分支
+（读档前 `Game1.multiplayerMode = 2`），所以主持端能正常开房。
+
+**三条判据（一分钟内认出分裂）**：
+1. 鱼鱼端 `player.name` 不是 `泡泡今天也要好好吃`，或 `homeLocation != FarmHousecd6d79b6-...`；
+2. 两端 `otherPlayers` 都为空；
+3. 同一天 `timeOfDay` 差几小时，且钱/钓鱼数不同。
+（补充：`netstat -ano | findstr 24642` 只有主持 PID 在听 = 主持在开房；农工端应该显示已连接。）
+
+**修复（已验证）**：
+1. 先停两端 night-guard（防止任一方到点睡觉把世界写进同一份存档）；
+2. 按 exe 路径只杀 **鱼鱼端** PID（`Stop-Process -Id`，绝不 `taskkill /IM`）；
+3. 用 `start-fish.bat`（或等价 env：`FEIYU_AUTOLOAD=0 FEIYU_AUTOJOIN=1 FEIYU_HOST=127.0.0.1`）重启鱼鱼端；
+4. 等 10~20s，`/state` 应出现 `player.name=泡泡今天也要好好吃`、`otherPlayers=[蓝色小肥鱼]`，两端时间/钱一致；
+5. 重启 `fish-night-guard` / `host-night-guard`（lastDay 状态是旧的）；
+6. 若主持因换日留在床上（`isInBed=true`），用 `/warp Farm 64,15` 弄下床，**不要 `/wakeup`**。
+
+本次代价：鱼鱼端那 40 分钟的单机进度被丢弃（存档里冬12 06:00 那份是它写的），主持世界保留（冬13 已存档）。
+
+**铁律⑧**：**农工客户端只能用 `start-fish.bat` / `restart-fish.ps1` 启动**。
+任何"直接 Start-Process StardewModdingAPI.exe"的重启都可能造出第二个单机世界；
+重启后第一件事是核对 `player.name` + `otherPlayers` + 两端 `timeOfDay` 是否一致。
+
+## §54 ⚠️ GET /fishbot 不带 action = toggle：查一下状态就把鱼竿开关翻一次
+
+**症状（冬16 潜艇连钓，鱼鱼 7843）**：人明明在钓（isFishing=true、bobber 在水里），fishCaught 却卡住不动、
+体力还在掉；查 `GET /fishbot` 返回 enabled:false —— 看起来像"Fishbot 自己静默关了"。
+
+**真因（反编译 NagiBridgeRemix.HandleFishbot + Fishbot 0.6.1 核实）**：
+```
+string action = GetParamOr(dict, "action", "toggle");   // 默认值就是 toggle!
+bool next = (action == "toggle") ? !now : (action == "on");
+if (action != "status") { field.SetValue(obj, next); ... }
+```
+**GET 没有 body → dict 空 → action 默认 "toggle" → 直接把 AutomationEnabled 取反**。
+所以"巡检时查一下开关"这个动作本身就会把它关掉，再查一次又打开。鱼鱼两次"钓着钓着停了"
+都是被这种查询翻掉的，不是潜艇深度、不是站位，也不是 Fishbot 的 AutoPause
+（AutoPause 会额外弹 GameMenu + 写 HUD 文本，现场没这两样）。
+
+**正确用法（唯一安全）**
+- 查状态：`POST /fishbot -H 'Content-Type: application/json' -d '{"action":"status"}'` → 只读，不翻。
+- 打开：`-d '{"action":"on"}'`；关闭：`-d '{"action":"off"}'`。
+- **永远不要用 GET /fishbot 或 POST 空 body 来"看看状态"**（空 body = toggle）。
+- 顺带：`/menu_close` 空 body 会被 Kestrel 回 411，同样要带 `-d '{}'`。
+
+**验收（冬16 19:12）**：status 查完 enabled 仍为 true，鱼鱼 fishCaught 141→143、menu=BobberBar 正常收线。
+
+## §55 锁时期间 farmhand 自己 /sleep = 床上冻住；cancel_sleep 不够，补一发 /wakeup
+
+**现象（冬16 19:20，时间锁着，夜市还开着）**：鱼鱼（7843）自己跑回 Cabin(9,9) 上了床，
+`isInBed=true`、`activeMenu=ReadyCheckDialog`、`sleepReady 1/2`，客户端整个卡在"正在等待其他玩家"，
+鱼竿拿在手里也不动。主持没睡，而时间锁把 timeOfDay 钉在 1920，所以这一觉永远不会完成。
+
+**处理（实测顺序）**
+1. `POST 7843/cancel_sleep -d '{}'` → `{"action":"cancelled","wokeUp":true}`：菜单关掉、sleepReady 归 0/2，
+   但 **isInBed 仍然是 true**（人还躺在床上，只是不再卡 ready-check）。
+2. 再 `POST 7843/wakeup -d '{}'` → `{"action":"warped","from":"Cabin","target":"Farm","x":52,"y":16}`：
+   直接把人送到 Farm(52,16)，`isInBed=false`、体力保留（225/270）。
+3. 事后留言板问她为什么睡（本次是她的自主收工判断），并说明：**锁时期间不要单独睡**，
+   要睡必须主持一起睡（全队 ready-check），否则只会把自己冻在床上。
+
+**判据**：看到 farmhand `inBed=true` + `ReadyCheckDialog` + 主持没睡 + 时间被锁 → 就是这种自锁，
+别等天亮（锁时不会天亮）。`cancel_sleep` 只解 UI，`/wakeup` 才解床位；两步都要。
+
+## §56 卖货白名单漏洞：\bEel\b 把「Spicy Eel 香辣鳗鱼」当鱼卖掉 + 鱼竿升级到铱竿
+
+**两件事（2026-11-05 冬19→20）**
+
+1. **误卖熟菜**：冬19 收工时 day-loop 把主持包里的 **Spicy Eel ×19 全部扔进出货箱**。
+   根因在 lib 的白名单正则：\`SELL_FISH = /\b(...|Eel|...)\b/\` 命中了 "Spicy Eel" 里的 Eel，
+   而它是**熟菜（category -7，回 115 体力）**，属于体力补给，绝不该卖。
+   修法（已同步 lib.mjs 与 lib-fish.mjs）：新增
+   \`\`\`
+   const COOKED_NOT_SELL = /^(Spicy Eel|Maki Roll|Sashimi|Sushi|Carp Surprise|Baked Fish|Fish Stew|
+     Fish Taco|Trout Soup|Lobster Bisque|Chowder|Escargot|Fried Eel|Seafoam Pudding)$/i;
+   export const isSellable = n => !COOKED_NOT_SELL.test(n) && (SELL_FISH.test(n) || SELL_CROPS.test(n) || SELL_TRASH.test(n));
+   \`\`\`
+   ⚠️ day-loop 是常驻 node 进程，改完 lib 必须重启进程才生效（本次已重启）。
+   以后加任何"按名字匹配"的白名单，**先想清楚会不会误伤熟菜/任务品**。
+
+2. **鱼竿升级（主持+鱼鱼都换铱竿）**：桥的 \`POST /buy\` 可以直接买工具，
+   工具不是 Object → 走默认价 **100g**（不是 7500g），\`{"id":"(T)IridiumRod","quantity":1}\`。
+   买完 \`/select "Iridium Rod"\` 拿在手上；它支持鱼饵+浮标，蓄力更远。
+   day-loop 原来按 \`/Rod|Pole/i\` 取**背包里第一把竿**，铱竿不一定是第一把 → 已改成
+   **优先 /Iridium Rod/，没有再退回任意竿**（两处：钓鱼入口 + 清包后重开）。
+
+**验收**：鱼鱼 119,250→119,150（-100g），包里出现 Iridium Rod 并选中；主持同样 -100g，占第 11 格。
+
+## §57 fishbot 假活：竿不在手上时 enabled=true 也一整天不抛竿（Day21 实测丢 12 小时）
+
+**现象（2026-11-06 冬21）**：主持 09:20 钓完最后一条后到 21:10 **整整 12 个游戏小时 0 抛竿**：
+`/state` 里 `player.fishCaught` 卡在 1457、`stamina` 卡在 222 一动不动，
+但 `POST /fishbot {"action":"status"}` 返回 **enabled:true**、游戏 HUD 也写着 "Fishbot active!"、
+`.day-loop.lock` 心跳正常（进程活着）。**光看 fishbot 状态和进程死活都判不出来。**
+
+**唯一可靠的判据**：`/state` 的 `player.currentItem == null` 且 `player.rod.inHand == false`。
+根因：钓到宝箱后自动收「高级鱼饵×5 / 铱矿石」，currentItem 被打掉变成 null，竿离开手上；
+fishbot 的 enabled 还是 true，但它没竿可抛 → 空转一整天。day-loop 原来只在钓鱼段**开头**选一次竿，
+中间不再校验，所以发现不了。
+
+**修复（day-loop.mjs 钓鱼循环，两处）**：
+1. **心跳校验竿**：每 200s 的 keepalive 里顺手读一次 state，`currentItem` 不匹配 /Rod|Pole/i 就重选
+   （优先 Iridium Rod）再 `/face 1`。
+2. **停滞哨兵**：连续 10 次心跳（≈33 分钟）`fishCaught` 和 `stamina` 都没变化 → 判假活，
+   硬重启 fishbot（off→on）并重选竿。
+
+**现场处置（立等可取）**：`fishbotSet(false) → sel('Iridium Rod') → face(1) → fishbotSet(true)`，
+实测 2 秒内 `bobberX` 出现、体力 -7，立刻恢复。**修完记得重启 day-loop 进程**（常驻 node 改代码不生效）。
+
+## §58 lib 里的 fishbotSet 一直是"空 body 盲翻两次"（§54 只写进文档没落进代码）
+
+**2026-11-06 复查发现**：`lib.mjs` 和 `lib-fish.mjs` 的 `fishbotSet(on)` 都还是老实现：
+
+```js
+let r = await post('/fishbot', {});      // 空 body = toggle!
+if (r.enabled !== on) { await sleep(300); r = await post('/fishbot', {}); }
+```
+
+它靠"翻一次看结果、不对再翻一次"来凑目标态，看似能对上，实际上**每次调用都会先把开关抖一下**：
+本来 OFF 想开 → 第一次就开了没问题；本来 ON 想保持开 → 第一次被它关掉，300ms 后再开回来。
+day-loop 每 200s 的 keepalive 一直在这么抖，正好和 fishbot 自身状态机抢，属于"钓着钓着停了"的隐形推手。
+
+**已修（两个 lib 同步）**：唯一安全写法——
+```js
+const cur = await post('/fishbot', { action: 'status' });
+if (!!cur.enabled === !!on) return cur.enabled;
+const r = await post('/fishbot', { action: on ? 'on' : 'off' });
+return r.enabled;
+```
+
+**教训**：§54 当时只在文档里写了"别用 GET 查状态"，代码层的 `post({})` 同样命中 toggle 默认值，
+文档修了不等于代码修了 —— 以后凡是"端点默认参数有副作用"的坑，**必须回头 grep 一遍所有 lib/脚本的调用点**。
+
+## §59 farmhand 端的每日结算(ShippingMenu)必须自己点 OK，否则她的客户端卡死
+
+**用户实测**：鱼鱼(7843) 每天早上的「每日收入面板」——耕种/采集/钓鱼/采矿/其它/总计那个页面——
+**主持这边点了结算不等于她也点了**，她的客户端会一直挂着这一页，换日/加载推不动。
+
+**两份处置（都已落地）**：
+1. `newday-trigger.mjs` 的 `settleNewDayMenus`：原来 `ShippingMenu` 点一次就 `break`，
+   而 1.6 的结算面板有**好几页**（逐项 → 总计），点一次只翻一页。已改成 `continue` 循环点到菜单消失（上限 10 次）。
+2. 新增常驻 `fish-settlement-guard.mjs`：每 2s 读 7843 `/state`，看到 `ShippingMenu`（或其 shipping 子菜单）
+   就 `POST /settlement_confirm` 带 `{}` body，一直点到菜单消失（最多 8 次 × 1.5s）。
+   **只碰 7843、只认结算类菜单**——背包/升级/ReadyCheck 一律不碰（那些归 newday-trigger）。
+   日志 `D:/StardewAI/fish-settlement.log`。
+
+**为什么不是"主持点一下就行"**：联机的两块客户端各有自己的 ShippingMenu，主持点的是主持那份；
+farmhand 那份只有她自己的客户端能推进（`/settlement_confirm` 只作用于本端 UI）。
+
+## §60 锁时挂机三件套：/eat 必须先 /select、体力阈值、看护脚本
+
+**用户要求（冬25 冬星宴当天）**："两个号继续钓会鱼，我等一下回来过活动" + "记得回体力"。
+
+1. **`/eat` 只吃"当前手持"的东西**：裸 `POST /eat {}` 会返回
+   `当前物品不可食用（先 /select 选个食物）`。正确顺序：`/select {name:"Tuna"}` → `/eat {}`。
+   ⚠️ 起竿小游戏（`activeMenu=BobberBar`）期间不能选物品，要等它结束再吃。
+   ⚠️ 吃完手里会变成食物，**必须重新 /select 鱼竿 + /face 1**，否则 fishbot 又变成"假活"（§57）。
+2. **体力阈值**：钓一竿 ~7 点，270 体力约 35 竿。锁定挂机时设 90 为进食线、吃到 220 就停，
+   既不会晕倒也不浪费熟菜。避开 Coffee（只回 3 点）。
+3. **`lock-fish-keep.mjs`（新增常驻）**：只在该文件检测到 `time-lock.flag` 时工作，解锁自动退出。
+   每 20s 对 7842/7843 做四件事：关挡路菜单 → 不在海滩就传回去 → 竿不在手重选铱竿 →
+   fishbot 用 `action=status/on` 校正；包快满（free≤2）回农场卖便宜鱼；体力<90 自动进食。
+   日志 `D:/StardewAI/lock-fish-keep.log`。
+
+**实测**：主持人 63→259（2 个金枪鱼），鱼鱼 148→255（1 个香辣鳗鱼），吃完都自动拿回铱竿继续抛。
+
+## §61 鱼饵耗尽 = 第二种"fishbot 假活"（enabled=true 但 0 抛竿）
+
+**2026-11-06 冬25 挂机实测**：主持的鱼竿在 20:13 左右饵用完（`rod.baitStack=0, baitInBag=0`），
+随后 **24 分钟 0 抛竿**：`POST /fishbot {"action":"status"}` 一直返回 `enabled:true`、体力还是满的 270、
+HUD 也显示 active —— 和 §57（竿不在手）症状一样，但原因不同。
+
+**判据（和 §57 并列）**：
+- `player.rod.baitStack == 0` 且 `rod.baitInBag == 0` → 饵耗尽（先查这个再查竿）
+- `player.currentItem` 有竿、`rod.inHand == true` 也照样不动
+
+**修法（桥自带专用端点，别去拖拽）**：
+```
+POST /give {"id":"(O)685","count":100}      // 补 100 个鱼饵（限定 ID 685）
+POST /rod  {"action":"bait"}                // 把背包里的鱼饵挂到竿上（item 可选）
+POST /rod  {"action":"show"}                // 看当前挂的饵/浮标
+```
+实测：给饵+挂上之后 `off → select 铱竿 → face 1 → on` 立刻恢复（bobberX 出现、体力开始掉）。
+
+**已并入 `lock-fish-keep.mjs`**：
+1. `baitGuard()`：饵空 → 背包有饵就挂；背包也没有就 `/give` 100 个再挂（锁时挂机没人去鱼店买）。
+2. **假活哨兵**：同一号连续 6 次巡检（≈2 分钟）`fishCaught` 不涨 → fishbot 硬重启 + 重选竿 + 补饵。
+
+⚠️ 挂机前先看一眼 `/rod`：鱼竿的饵是消耗品，100 个大约能撑 1~1.5 个游戏日的连续钓鱼。

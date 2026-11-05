@@ -16,7 +16,9 @@ import {
   seeText, renderMap, ringText, tileDesc, canText, clockOf, seasonCN,
   findLandmark, homeOf, WORLD, LEGEND, parseCmd, resolveSeed, seedCN, todoList, dir8,
   arrivalText, weatherText, luckText, packText,
+  placesInMap, placeLine, mapCN, MAP_CN, AREA_ALIAS, hoursText, openNow,
 } from './fish-eye-lib.mjs';
+import { makeWorld } from './world-map.mjs';
 
 const PORT = Number(process.env.FISHEYE_PORT || 7851);
 const TARGET = process.env.FISHEYE_TARGET || 'fish'; // 默认操作小鱼的角色
@@ -28,7 +30,7 @@ const RIVAL_BASE = process.env.FISHEYE_RIVAL || BRIDGE[RIVAL];
 const LOG_PATH = 'D:/StardewAI/fish-eye.log';
 const SEEN_PATH = process.env.FISHEYE_SEEN || 'D:/StardewAI/fish-eye-seen.json';
 
-const primes = new Set(); // 已经整图扫过 /map 的地图名
+// (旧 primeMap 已删: /map 没有 tiles, 整图走 /passable_rect)
 const log = (...a) => {
   const line = new Date().toTimeString().slice(0, 8) + ' ' + a.join(' ');
   console.log(line);
@@ -58,6 +60,10 @@ const rivalGet = (p) => api(RIVAL_BASE, p, {}, 8000);
 async function state() { return get('/state'); }
 async function surr(r = 8) { return get(`/surroundings?radius=${r}`); }
 
+// ⭐2026-11-05 全地图数据层: /warps 全图传送表 + /tile_props 任意图的门/营业时间 + /passable_rect 任意图可行走格
+//   → "地图 镇子"/"地图 裁缝铺" 不用把她送过去就能画整张图, 跨图路线也能算出来
+const world = makeWorld({ get, log });
+
 // ---------- 地图缓存: 走过的地方记住, 越走越全 ----------
 let seenCache = {}; // { locationName: { "x,y": tile } }
 try { seenCache = JSON.parse(fs.readFileSync(SEEN_PATH, 'utf8')); } catch { }
@@ -76,32 +82,13 @@ setInterval(() => {
 
 const tilesOf = (loc) => Object.entries(seenCache[loc] || {}).map(([k, t]) => ({ ...t, x: +k.split(',')[0], y: +k.split(',')[1] }));
 
-// 整图一次扫: 桥的 /map 直接给全图 tiles(不用她一格一格走才知道), 只在缺图时扫一次
-// 回包形如 {ok, location, x, y, w, h, tiles:[..], layerTiles, mapProperties}
-const primed = new Set();
-async function primeMap(loc) {
-  if (!loc || primed.has(loc)) return 0;
-  primed.add(loc);
-  const before = Object.keys(seenCache[loc] || {}).length;
-  const m = await get('/map', 30000);
-  if (m?.ok === false || !Array.isArray(m?.tiles) || !m.tiles.length) {
-    log('primeMap: /map 不可用 →', JSON.stringify(m).slice(0, 120), '(退回走路记图)');
-    primes.add(loc);
-    return 0;
-  }
-  remember(loc, m.tiles);
-  const after = Object.keys(seenCache[loc] || {}).length;
-  log(`primeMap: ${loc} 整图 ${m.tiles.length} 格 (缓存 ${before}→${after})`);
-  return after - before;
-}
-
-// 每次读状态顺手把周围并进地图, 图自己会长
+// 每次读状态顺手把周围并进地图缓存(带作物/水/机器的细信息)
+// ⚠️2026-11-05 更正: /map 只回 location{width,height}/warps/npcs/buildings, **没有 tiles** ——
+//   整图骨架改用 world-map 的 /passable_rect; 这里的 seenCache 只做"细信息覆盖"(作物/水/机器)
 async function stateAndTiles(r = 10) {
   let [s, sr] = await Promise.all([state(), surr(r)]);
   const loc = s?.location?.name || s?.location;
   if (sr?.tiles) remember(loc, sr.tiles);
-  // 第一次来这张图 → 整图扫一次, 让"地图"一次就完整(她抱怨过"没地图记不住")
-  if (loc && !primes.has(loc)) await primeMap(loc);
   return { s, tiles: sr?.tiles || [], loc };
 }
 
@@ -114,8 +101,9 @@ function helpText(who) {
 
 看:
   看看 / 状态            现在几点、在哪、体力、手上、水壶、四周有什么
-  地图                    以你为中心画一张图(走过的路会记住, 越走越全)
-  世界怎么走              哪边是海、家在哪、矿在哪 → 一句话方位图
+  地图                    以你为中心画一张图 + 附近地标
+  地图 镇子 / 地图 裁缝铺  画那一整张图(不在那边也能看), 标出所有门和营业时间
+  世界怎么走              整张世界地图的路: 哪个出口通哪、裁缝和商店都在哪
   水壶还有多少水          壶里剩多少, 不用掏出来看
   该干嘛                  给你个目标(没目标时看这个)
   农场怎么样              全农场一次统计: 多少株/浇了多少/多少能收
@@ -126,7 +114,9 @@ function helpText(who) {
   打水                    在水边装满水壶
   锄地                    把身边一片空地锄出来(整块, 不东一口西一口)
   种蓝莓 / 种番茄 ...     先除草→锄地→才下种, 整块种在一起
-  去田边 / 回家 / 去镇子   一句话走过去(自动寻路, 不用一格一格点)
+  去裁缝铺 / 去镇上 / 回家  一句话直接送到(店能直接送进店里)
+  出去                    在屋里/店里时, 一句话给你送出门
+  裁缝铺在哪              告诉你在哪张图、门在几号、几时开门
 
 修:
   卡床上了                两人都躺床上天亮不了时, 一句话破环下床(不用重开游戏)
@@ -138,42 +128,132 @@ function helpText(who) {
   · 21:30 之后会劝你回家(守卫到点会自动让你上床)`;
 }
 
-// ---------- 动作: 走路(寻路优先) ----------
+// ---------- 动作: 走路(同图寻路 / 跨图直传 / 进屋用 warp_building) ----------
+// ⭐2026-11-05 全量地标后: 商店能直接落到店里的"门口落点"(LockedDoorWarp 给的那格),
+//   自家的 Cabin 两间同名, 只能靠 /warp_building 的农场建筑坐标进屋, 否则会进错屋。
+async function waitLoc(loc, secs = 8) {
+  for (let i = 0; i < Math.ceil(secs / 1.2); i++) {
+    await sleep(1200);
+    const s = await state();
+    if ((s?.location?.name || s?.location) === loc) return s;
+    if (s?.activeMenu) await post('/menu_close', {});
+  }
+  return null;
+}
+
+// 门口站位: 门格本身是实心的, 找门下方/四周最近能站的格
+async function nearestStand(loc, x, y, maxR = 4) {
+  const g = await world.grid(loc);
+  if (!g || !g.w) return null;
+  if (g.cells.get(`${x},${y}`) === '.') return [x, y];
+  for (let r = 1; r <= maxR; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+        if (g.cells.get(`${x + dx},${y + dy}`) === '.') return [x + dx, y + dy];
+      }
+    }
+  }
+  return null;
+}
+
 async function goto(to) {
   const lm = findLandmark(to, TARGET);
   if (!lm) {
-    return fail(`我听不懂"${to}"。我知道的地方: ${[...new Set(LANDMARKS_FOR(TARGET).map((l) => l.name))].join(' / ')}`);
+    const names = ['小鱼的家', '农田', '出货箱', '温室', '镇中心', '皮埃尔杂货店', '艾米丽家(裁缝)', '铁匠铺', '博物馆', '酒吧', '罗宾木匠铺', '玛妮牧场', '威利鱼店', '矿洞', '海滩', '森林'];
+    return fail(`我听不懂"${to}"。常用的: ${names.join(' / ')}\n(想知道某个地方在哪, 直接问"XX在哪"; 想看整张图说"地图 镇子")`);
   }
   const s0 = await state();
   const curLoc = s0?.location?.name || s0?.location;
   const px = s0?.player?.x, py = s0?.player?.y;
+  const shut = lm.door?.hours && openNow(lm.door.hours, s0?.time?.timeOfDay) === false;
+  const shutNote = shut ? `\n⚠️ 现在${hoursText(lm.door.hours)}已经关门了 —— 我把你送进去, 但柜台可能不营业` : '';
+  // 目标站位: 地标坐标本身可能是门/作物/柜台(站不住), 取最近能站的格
+  let stand = lm.stand ? lm.stand : [lm.x, lm.y];
+  if (!lm.building) {
+    const st = await nearestStand(lm.loc, lm.x, lm.y);
+    if (st) stand = st;
+  }
+
   if (curLoc === lm.loc && Math.abs(px - lm.x) + Math.abs(py - lm.y) <= 2) {
     return ok(`你已经到【${lm.name}】了 (${px},${py})`);
   }
-  // 同图: 交给桥自己的寻路 /walk_to(它一次走整段)
+
+  // ① 同图: 交给桥自己的寻路 /walk_to(它一次走整段)
   if (curLoc === lm.loc) {
-    const r = await post('/walk_to', { x: lm.x, y: lm.y }, 60000);
+    const r = await post('/walk_to', { x: stand[0], y: stand[1] }, 60000);
     if (r?.ok !== false && !r?.error) {
       const s = await state();
-      const reached = s?.player && Math.abs(s.player.x - lm.x) + Math.abs(s.player.y - lm.y) <= 3;
+      const reached = s?.player && Math.abs(s.player.x - stand[0]) + Math.abs(s.player.y - stand[1]) <= 3;
       if (reached) return ok(`走到${arrivalText(s, lm.name)}`);
       return `⚠️ 往【${lm.name}】走了, 但现在在 (${s?.player?.x},${s?.player?.y}) — ${r?.note || r?.reason || '离得还远, 再喊一次'}`;
     }
     log('walk_to 不可用, 回退 warp:', JSON.stringify(r).slice(0, 120));
   }
-  // 跨图 或 walk_to 不可用: /warp + 轮询
-  const spot = lm.stand ? lm.stand : [lm.x, lm.y];
-  await post('/warp', { location: lm.loc, x: spot[0], y: spot[1] }, 30000);
-  for (let i = 0; i < 8; i++) {
-    await sleep(1200);
-    const s = await state();
-    if ((s?.location?.name || s?.location) === lm.loc) {
+
+  // ② 农场建筑(小屋/温室/农舍): 同名建筑只能按坐标进, 这是唯一不会进错的方法
+  if (lm.building) {
+    const r = await post('/warp_building', { bx: lm.building.bx, by: lm.building.by, x: -1, y: -1 }, 30000);
+    const s = await waitLoc(lm.loc, 8);
+    if (s) {
       remember(lm.loc, (await surr(10))?.tiles);
-      return ok(arrivalText(s, lm.name));
+      return ok(arrivalText(s, lm.name)) + shutNote;
     }
-    if (s?.activeMenu) await post('/menu_close', {});
+    log('warp_building 失败, 改走 warp:', JSON.stringify(r).slice(0, 120));
   }
-  return fail(`没走到【${lm.name}】(${lm.loc} ${spot[0]},${spot[1]})。可能被墙挡着或没解锁, 我再想想别的路。`);
+
+  // ③ 室内落点直传(商店/矿洞/社区中心等, 坐标来自门里的 LockedDoorWarp)
+  if (lm.loc !== curLoc) {
+    const r = await post('/warp', { location: lm.loc, x: stand[0], y: stand[1] }, 30000);
+    const s = await waitLoc(lm.loc, 8);
+    if (s) {
+      remember(lm.loc, (await surr(10))?.tiles);
+      const route = await world.routeHops(curLoc, lm.loc);
+      return ok(arrivalText(s, lm.name)) + shutNote
+        + (route && route.length > 2 ? `\n(路线本来是: ${route.map(mapCN).join(' → ')})` : '');
+    }
+    log('室内直传没成, 走门口兜底:', JSON.stringify(r).slice(0, 140));
+
+    // ④ 兜底: 先到门外, 让她自己迈一步(有些室内落点站不住/门要钥匙)
+    if (lm.door) {
+      const stl = await nearestStand(lm.door.loc, lm.door.x, lm.door.y + 1)
+        || await nearestStand(lm.door.loc, lm.door.x, lm.door.y);
+      if (stl) {
+        await post('/warp', { location: lm.door.loc, x: stl[0], y: stl[1] }, 30000);
+        const s2 = await waitLoc(lm.door.loc, 6);
+        if (s2) {
+          return `⚠️ 送到【${lm.name}】门外了 (${stl[0]},${stl[1]})。门在${dir8(lm.door.x - stl[0], lm.door.y - stl[1])}边(${lm.door.x},${lm.door.y}) — 往上走一步(或者说"进去")就能进。${shutNote}`;
+        }
+      }
+    }
+    return fail(`没走到【${lm.name}】(${mapCN(lm.loc)} ${lm.x},${lm.y})。可能门锁着/还没解锁, 或者这格站不住。`);
+  }
+
+  // ⑤ 同图但不在目标(且 walk_to 不可用): 直接改坐标
+  const r = await post('/warp', { location: lm.loc, x: stand[0], y: stand[1] }, 30000);
+  const s = await state();
+  return r?.ok === false && r?.skipped_warp
+    ? fail(`【${lm.name}】那格站不住(${stand[0]},${stand[1]}), 旁边能站: ${(r.standable_near || []).map((q) => `(${q.x},${q.y})`).join(' ')} — 再喊一次我挪过去`)
+    : ok(arrivalText(s, lm.name));
+}
+
+// ---------- 出去: 从屋里/店里送到门外 ----------
+async function leave() {
+  const s = await state();
+  const loc = s?.location?.name || s?.location;
+  if (!loc || !s?.player) return fail('读不到状态(游戏没开?)');
+  const OUT = new Set(['Farm', 'Town', 'Beach', 'Forest', 'Mountain', 'BusStop', 'Backwoods', 'Railroad', 'Desert', 'Woods', 'Mine', 'SkullCave', 'Tunnel']);
+  const ex = (await world.exitsOf(loc)) || [];
+  if (!ex.length) return fail(`【${mapCN(loc)}】这张图没有出口传送点(可能是特殊地图), 说"去农场"/"去镇子"我直接送你。`);
+  const pick = ex.find((e) => OUT.has(e.to)) || ex[0];
+  const r = await post('/warp', { location: pick.to, x: pick.tx, y: pick.ty }, 30000);
+  if (r?.ok === false) {
+    // 落点站不住就退到目的地中心
+    await post('/warp', { location: pick.to, x: -1, y: -1 }, 30000);
+  }
+  const s2 = await waitLoc(pick.to, 8);
+  if (s2) return ok(`出来了 — ${arrivalText(s2, mapCN(pick.to))}\n(从【${mapCN(loc)}】(${pick.x},${pick.y})的出口出来的)`);
+  return fail(`出不去。可以试着说"去农场"/"去镇子", 我直接送你。`);
 }
 
 // ---------- 全农场统计(/farm_report 一次扫所有地图) ----------
@@ -472,24 +552,128 @@ async function standNear(tx, ty) {
 }
 
 // ---------- 地图/世界 ----------
-async function mapText(who = TARGET, w = 41, h = 17) {
-  const { s, tiles, loc } = await stateAndTiles(12);
-  const p = s?.player;
-  if (!p) return fail('读不到状态');
-  const seen = new Map(Object.entries(seenCache[loc] || {}).map(([k, t]) => [k, { ...t, x: +k.split(',')[0], y: +k.split(',')[1] }]));
-  const lm = LANDMARKS_FOR(who);
-  const m = renderMap(seen, p.x, p.y, w, h, lm.filter((l) => l.loc === loc));
-  const here = lm.filter((l) => l.loc === loc || Math.abs(l.x - p.x) + Math.abs(l.y - p.y) < 60);
-  const near = here
-    .map((l) => ({ l, d: Math.abs(l.x - p.x) + Math.abs(l.y - p.y), same: l.loc === loc }))
-    .sort((a, b) => (a.same === b.same ? a.d - b.d : a.same ? -1 : 1))
-    .slice(0, 4)
-    .map(({ l, d, same }) => `${l.name}(${same ? '本地图' : l.loc}) ${same ? `${l.x},${l.y}` : '要走过去'} ${dir8(l.x - p.x, l.y - p.y)}方向 ${d}格`);
-  return `${m}\n${LEGEND}\n\n附近地标:\n  ${near.join('\n  ')}\n(说"去${here[0]?.name || '家'}"我就带你过去)`;
-}
+// ⭐2026-11-05 完整地图: 三档
+//   ①"地图"           = 你身边的 41×17 实图(作物/石头/水都画) + 附近地标 + 一句世界方位
+//   ②"地图 <地点>"     = 那一整张图(缩略), 标出所有门/柜台/出口和营业时间 —— 不在那边也能看
+//   ③"世界怎么走"      = 全世界出口图(哪个门通哪)
 function LANDMARKS_FOR(who) {
-  // 只暴露属于这个人(或公共)的地标
   return (globalThis.__LM_ALL || []).filter((l) => !l.who || l.who === who);
+}
+
+// 一张图里要标的点: 本身在这图里的地标 + "门开在这张图"的店(用门的坐标)
+function marksForMap(loc, who) {
+  const out = [];
+  const seen = new Set();
+  for (const l of LANDMARKS_FOR(who)) {
+    const m = l.loc === loc ? { l, x: l.x, y: l.y, here: true }
+      : (l.door && l.door.loc === loc && l.cat !== 'spot' ? { l, x: l.door.x, y: l.door.y, here: false } : null);
+    if (!m) continue;
+    const k = `${m.x},${m.y}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(m);
+  }
+  return out;
+}
+
+function locFromWord(word, who) {
+  if (!word) return null;
+  const lm = findLandmark(word, who);
+  if (lm) return { loc: lm.loc, lm };
+  if (AREA_ALIAS[word]) return { loc: AREA_ALIAS[word], lm: null };
+  const byCN = Object.entries(MAP_CN).find(([, cn]) => cn === word);
+  if (byCN) return { loc: byCN[0], lm: null };
+  if (MAP_CN[word]) return { loc: word, lm: null };
+  return null;
+}
+
+async function mapText(who = TARGET, word = '') {
+  const s = await state();
+  if (!s?.player) return fail('读不到状态(游戏没开或桥断了)');
+  const curLoc = s?.location?.name || s?.location;
+
+  if (!word) {
+    // ① 身边实图: 骨架用 /passable_rect 整图扫(完整!), 再把走过的格子换成更细的作物/水/机器标记
+    const { s: s2, tiles, loc } = await stateAndTiles(12);
+    const p = s2?.player || s.player;
+    const g0 = await world.grid(loc);
+    // 按离她远近编号, 保证"图上的数字"和"下面的列表"是同一个号
+    const mk = marksForMap(loc, who)
+      .map((q) => ({ ...q, d: Math.abs(q.x - p.x) + Math.abs(q.y - p.y) }))
+      .sort((a, b) => a.d - b.d);
+    const lmMarks = mk.map((m, i) => ({ l: m.l, x: m.x, y: m.y, mark: world.MARK_ORDER[i % world.MARK_ORDER.length] }));
+    let m;
+    if (g0?.w) {
+      const cells = new Map(g0.cells);
+      for (const [k, t] of Object.entries(seenCache[loc] || {})) cells.set(k, tileDesc(t).char);
+      const g = { w: g0.w, h: g0.h, cells };
+      const renderMarks = lmMarks.map((x) => ({ x: x.x, y: x.y, ch: x.mark }));
+      // 小图(室内/商店)整张贴出来最清楚; 大地图只开她身边 41×17 的窗口
+      m = (g.w <= 45 && g.h <= 34)
+        ? world.renderWhole(g, [...renderMarks, { x: p.x, y: p.y, ch: '@' }], 64, 40)
+        : world.renderWindow(g, p.x, p.y, 41, 17, renderMarks).text;
+    } else {
+      // 特殊图(矿山内部等)读不到可行走格 → 退回"走过的格子"老办法
+      const seen = new Map(Object.entries(seenCache[loc] || {}).map(([k, t]) => [k, { ...t, x: +k.split(',')[0], y: +k.split(',')[1] }]));
+      m = renderMap(seen, p.x, p.y, 41, 17, lmMarks);
+    }
+    const near = mk.slice(0, 6)
+      .map((q, i) => `${world.MARK_ORDER[i]} ${q.l.name}${q.here ? '' : '(门)'} (${q.x},${q.y}) ${dir8(q.x - p.x, q.y - p.y)} ${q.d}格`);
+    const tips = `${NL}【${mapCN(loc)}】里的地标:${NL}  ${near.join(NL + '  ') || '(这张图没标地标)'}`
+      + `${NL}(说"去${mk[0]?.l.name || '家'}"我直接送你; 想看整张图说"地图 ${mapCN(loc)}", 想看全世界说"世界怎么走")`;
+    return `${m}${NL}${LEGEND}${tips}`;
+  }
+
+  // ② 任意一张图
+  const hit = locFromWord(word, who);
+  let loc = hit?.loc;
+  if (!loc) {
+    const all = await world.warpsAll();
+    if (all && all[word]) loc = word;
+  }
+  if (!loc) return fail(`不知道"${word}"。可以说: 地图 镇子 / 地图 山里 / 地图 裁缝铺 / 地图 矿洞 / 地图 我家`);
+  const g = await world.grid(loc);
+  if (!g || !g.w) {
+    // Cabin/棚屋这类 instanced 室内拿不到整图 → 只有人就在里面时, 用她走过记下的格子画个近景
+    const seenNow = seenCache[loc] || {};
+    if (curLoc !== loc || !Object.keys(seenNow).length) {
+      const lm = hit?.lm;
+      return fail(`【${mapCN(loc)}】是室内小图, 只有你人在里面时才能画(现在你在${mapCN(curLoc)})。`
+        + (lm ? `${NL}${placeLine(lm, s?.time?.timeOfDay)}${NL}说"去${lm.name}"我直接把你送进去。` : ''));
+    }
+    const seen = new Map(Object.entries(seenNow).map(([k, t]) => [k, { ...t, x: +k.split(',')[0], y: +k.split(',')[1] }]));
+    const lmMk = marksForMap(loc, who).map((m, i) => ({ ...m.l, x: m.x, y: m.y, mark: world.MARK_ORDER[i % world.MARK_ORDER.length] }));
+    return renderMap(seen, s.player.x, s.player.y, 41, 17, lmMk) + NL + LEGEND;
+  }
+  const mk = marksForMap(loc, who);
+  const render = mk.map((m, i) => ({ x: m.x, y: m.y, ch: world.MARK_ORDER[i % world.MARK_ORDER.length] }));
+  const p = s.player;
+  const body = world.renderWhole(g, render);
+  const pNow = s?.time?.timeOfDay;
+  const lines = [`【${mapCN(loc)}】 ${loc}  ${g.w}×${g.h}${curLoc === loc ? `  你在(${p.x},${p.y})` : ''}`];
+  if (hit?.lm) lines.push(`★ ${placeLine(hit.lm, pNow)}`);
+  const list = mk.slice(0, 26).map((m, i) => {
+    const tag = m.here ? '' : '的门';
+    const h = m.l.door?.hours && !m.here ? ' ' + hoursText(m.l.door.hours) : '';
+    const sn = m.l.cat === 'spot' ? ' (柜台)' : '';
+    return `  ${world.MARK_ORDER[i % world.MARK_ORDER.length]} ${m.l.name}${tag}${sn} (${m.x},${m.y})${h}`;
+  });
+  if (list.length) lines.push('地标:', ...list);
+  if (curLoc !== loc) {
+    const viaDoor = hit?.lm?.door && hit.lm.door.loc !== loc ? hit.lm.door.loc : null;
+    if (viaDoor && curLoc === viaDoor) {
+      lines.push(`怎么去: 你已经在${mapCN(viaDoor)}了, 门在(${hit.lm.door.x},${hit.lm.door.y}) — 说"去${hit.lm.name}"我直接把你送进去`);
+    } else {
+      const route = await world.routeText(curLoc, viaDoor || loc);
+      if (route) lines.push(`怎么去: ${route}`);
+      if (viaDoor) lines.push(`  到${mapCN(viaDoor)}后门在(${hit.lm.door.x},${hit.lm.door.y}) — 说"去${hit.lm.name}"我直接把你送进去`);
+      else if (hit?.lm?.building) lines.push(`  说"去${hit.lm.name}"我直接送你进屋`);
+      else if (!route) lines.push(`  说"去${mapCN(loc)}"我直接把你送过去`);
+    }
+  } else if (hit?.lm) {
+    lines.push(`说"去${hit.lm.name}"我直接送你过去`);
+  }
+  return body + NL + lines.join(NL) + NL + LEGEND;
 }
 
 // ---------- 指令分发 ----------
@@ -500,7 +684,8 @@ async function dispatch(cmd) {
   switch (p.op) {
     case 'help': return helpText(TARGET);
     case 'world': return WORLD;
-    case 'map': return mapText(TARGET);
+    case 'map': return mapText(TARGET, p.to || '');
+    case 'leave': return leave();
     case 'watercan': { const s = await state(); return `水壶: ${canText(s)}\n(${clockOf(s?.time?.timeOfDay)} ${seasonCN(s?.time?.season)}${s?.time?.dayOfMonth}日 在${s?.location?.name})`; }
     case 'see': { const { s, tiles } = await stateAndTiles(6); return seeText(s, tiles); }
     case 'todo': { const { s, tiles } = await stateAndTiles(12); return '今天可以这样:\n· ' + todoList(s, tiles).join('\n· '); }
@@ -523,7 +708,7 @@ async function dispatch(cmd) {
       return ripen(30);
     }
     default:
-      return fail(`这句我还不会: "${c}"\n试试这些: 看看 / 地图 / 世界怎么走 / 水壶还有多少水 / 该干嘛 / 收菜 / 浇水 / 打水 / 锄地 / 种蓝莓 / 去田边 / 回家 / 帮助`);
+      return fail(`这句我还不会: "${c}"\n试试这些: 看看 / 地图 / 地图 镇子 / 世界怎么走 / 水壶还有多少水 / 该干嘛 / 收菜 / 浇水 / 打水 / 锄地 / 种蓝莓 / 去裁缝铺 / 回家 / 出去 / 帮助`);
   }
 }
 
@@ -563,7 +748,7 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/selftest') return send(200, await selftest());
     if (u.pathname === '/state') { const s = await state(); return json(s); }
     if (u.pathname === '/see') return send(200, await dispatch('看看'));
-    if (u.pathname === '/map') return send(200, await dispatch('地图'));
+    if (u.pathname === '/map') return send(200, await dispatch('地图 ' + (u.searchParams.get('loc') || '')));
     if (u.pathname === '/world') return send(200, WORLD);
     if (u.pathname === '/todo') return send(200, await dispatch('该干嘛'));
     if (u.pathname === '/watercan') return send(200, await dispatch('水壶还有多少水'));

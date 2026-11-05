@@ -154,11 +154,12 @@ export async function waterAll(radius = 12) {
 
 // fishbot 设定到指定状态（/fishbot 是 toggle，必须校验 enabled 再决定是否补一刀）
 export async function fishbotSet(on) {
-  let r = await post('/fishbot', {});
-  if (r.enabled !== on) {
-    await sleep(300);
-    r = await post('/fishbot', {});
-  }
+  // ⭐2026-11-06 §54 根治(与 lib.mjs 同步): /fishbot 不带 action = toggle。
+  //   老实现 post({}) 盲翻两次 → 每次调用都在开/关之间抖一下, 这是鱼鱼"钓着钓着停了"的元凶之一。
+  //   唯一安全写法: action=status 读 → 不一致才 action=on/off 写。
+  const cur = await post('/fishbot', { action: 'status' });
+  if (!!cur.enabled === !!on) return cur.enabled;
+  const r = await post('/fishbot', { action: on ? 'on' : 'off' });
   return r.enabled;
 }
 
@@ -180,10 +181,12 @@ export function physicalRightClick(ax, ay) {
 
 // ================= 卖出白名单政策 (2026-10-28 用户拍板) =================
 // 原则: 只有白名单内的东西才卖; 白名单外一律 存木箱(没有箱子就留背包), 宁可停钓不可误卖
-const SELL_FISH = /\b(Bass|Trout|Catfish|Chub|Perch|Carp|Sunfish|Shad|Walleye|Bream|Pike|Eel|Sardine|Anchovy|Flounder|Halibut|Octopus|Squid|Snapper|Tuna|Cucumber|Stonefish|Ghostfish|Dorado|Blobfish|Slimejack|Pufferfish|Stingray|Lionfish|Salmon|Ice Pip|Lava Eel|Sandfish)\b/;
+const SELL_FISH = /\b(Bass|Trout|Catfish|Chub|Perch|Carp|Sunfish|Shad|Walleye|Bream|Pike|Eel|Sardine|Anchovy|Flounder|Halibut|Octopus|Squid|Snapper|Tuna|Albacore|Herring|Tilapia|Red Mullet|Sea Jelly|Mackerel|Sturgeon|Lingcod|Void Salmon|Super Cucumber|Midnight Carp|Woodskip|Tiger Trout|Cucumber|Stonefish|Ghostfish|Dorado|Blobfish|Slimejack|Pufferfish|Stingray|Lionfish|Salmon|Ice Pip|Lava Eel|Sandfish)\b/;
 const SELL_CROPS = /^(Parsnip|Strawberry|Cauliflower|Potato|Melon|Tomato|Blueberry|Hot Pepper|Pepper|Wheat|Corn|Eggplant|Pumpkin|Yam|Grape|Amaranth|Kale|Radish|Green Bean|Starfruit|Rhubarb|Hops|Tea Leaves|Unmilled Rice|Fiddlehead Fern|Cranberries|Sweet Gem Berry|Ancient Fruit)$/;
 const SELL_TRASH = /^(Trash|Driftwood|Soggy Newspaper|Broken CD|Broken Glasses|Joja Cola)$/;
-export const isSellable = n => SELL_FISH.test(n) || SELL_CROPS.test(n) || SELL_TRASH.test(n);
+// ⭐2026-11-05 政策漏洞(与 lib.mjs 同步): SELL_FISH 的 \bEel\b 会把 Spicy Eel(香辣鳗鱼, 熟菜)当鱼卖掉 → 熟菜一律不卖
+const COOKED_NOT_SELL = /^(Spicy Eel|Maki Roll|Sashimi|Sushi|Carp Surprise|Baked Fish|Fish Stew|Fish Taco|Trout Soup|Lobster Bisque|Chowder|Escargot|Fried Eel|Seafoam Pudding)$/i;
+export const isSellable = n => !COOKED_NOT_SELL.test(n) && (SELL_FISH.test(n) || SELL_CROPS.test(n) || SELL_TRASH.test(n));
 
 // 任务保留位(用户拍板"有邮件优先做任务"): 这些物品即使可卖也要留 N 件在背包
 // quest 101 = 乔迪要 1 花椰菜(10-29)
@@ -383,15 +386,20 @@ export async function findChest(radius = 18) {
 
 // 按名字存一件进木箱 (纯 HTTP, 不需要 UI)
 export async function storeToChest(name, chest) {
+  // 2026-11-05 坑: 箱满时 /store 假 ok(桥返回 ok 但物品没动) → 清仓循环空转。铁律②: 存完重读背包确认真少了。
+  const before = invCount(await st(), name);
   const r = await post('/store', { name, x: chest.x, y: chest.y });
-  return !r.error;
+  if (r.error) return false;
+  await sleep(300);
+  if (invCount(await st(), name) >= before) { log('存箱没生效(' + name + ') —— 箱子满了? 该换箱/做新箱'); return false; }
+  return true;
 }
 
 // 合成木箱 (需 50 木)
 // ⚠️ 10-29 血泪坑: 背包满时合成会 "item dropped" 掉地上! 合成前必须有空格
 export async function craftChest() {
   const s = await st();
-  if (s.inventory.filter(i => i.name).length >= 12) { log('背包满, 拒绝合成(防掉落)'); return false; }
+  if (s.inventory.filter(i => i.name).length >= (s.player.maxItems || 12)) { log('背包满, 拒绝合成(防掉落)'); return false; }  // 2026-11-05: 原写死12格, 联机背包36格被误判满
   const r = await post('/craft', { name: 'Chest' }).catch(e => ({ error: String(e) }));
   log('craft Chest →', JSON.stringify(r).slice(0, 150));
   return !r.error;
@@ -399,7 +407,7 @@ export async function craftChest() {
 
 // 把手上的箱子放到杂货箱(72,14)附近空地, 成功返回箱子坐标
 export async function placeChestNearHouse() {
-  const spots = [[71, 16], [70, 16], [73, 15], [71, 13], [73, 13], [70, 14]];
+  const spots = [[71, 16], [70, 16], [73, 15], [71, 13], [73, 13], [70, 14], [66, 16], [67, 16], [74, 16], [75, 15], [76, 15], [62, 16], [63, 16]];
   for (const [x, y] of spots) {
     const t = (await surr(14)).tiles.find(z => z.x === x && z.y === y);
     if (!t || t.object || t.crop || t.terrain === 'HoeDirt') continue;
@@ -586,7 +594,7 @@ export async function sellAndStore(chest, force = false) {
       const it = (await st()).inventory.find(i => i.name && shouldStore(i.name));
       if (!it) break;
       if (await storeToChest(it.name, chest)) { stored++; log('存箱', it.name); await sleep(400); }
-      else break;
+      else { log('存箱失败, 停止重试(防空转)'); break; }
     }
   }
   // 2026-11-05 改无点击: openBin 物理右键整套退休(源码实锤 /sell 直接塞出货箱, 零点击零前台)。
@@ -639,6 +647,11 @@ export async function sellAndStore(chest, force = false) {
 // ⚠️ 桥不认 count 参数(源码只读 name/all)→ 每次都是整叠投, 别指望部分卖出
 // 返回 { ok, sold:[{item,count,price}], totalItems }
 export async function sellByName(name, count) {
+  // 2026-11-06 鱼鱼卖错种子事故保险: 种子/苗/面包绝不可卖(种子要种, 面包是口粮) —— 整类硬拒绝
+  if (/Seeds$|Starter$|Shoot$|Tuber$|Bean$/i.test(String(name)) || /Bread/i.test(String(name))) {
+    log('!! 拒绝卖 ' + name + ' —— 种子/口粮保护(铁律级), 想处理它请走存箱');
+    return { ok: false, error: 'protected: seeds/food never sell' };
+  }
   const body = count ? { name, count } : { name };
   return post('/sell', body);
 }

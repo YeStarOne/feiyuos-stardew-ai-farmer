@@ -18,6 +18,11 @@ import {
 // 收工体力目标(star rest 借鉴: 阈值收口成常量, 调整不用翻流程) — 政策仍是"用完再睡不浪费"
 const REST_TARGET = 15;
 
+// ⭐2026-11-06 存档事故: /sleep 返回 ok 不等于写盘。每次睡完必须看 SaveGameInfo 的 mtime 有没有前进,
+//   否则会像冬3~冬8 那样"天天换日、一次没存"(存档停在冬2 10:19, 重读丢了 6 天)。
+const SAVE_INFO = 'C:/Users/Administrator/AppData/Roaming/StardewValley/Saves/肥鱼肥鱼_452739119/SaveGameInfo';
+const saveMtime = () => { try { return fs.statSync(SAVE_INFO).mtimeMs; } catch { return 0; } };
+
 // ===== 锁文件: 防止 cron 重复拉起多实例 =====
 const LOCK = 'D:/StardewAI/.day-loop.lock';
 try {
@@ -116,10 +121,10 @@ async function tryQuests() {
 // ===== 单日流程 =====
 async function playOneDay(day) {
   // ⭐2026-11-06: 晨间先出床 —— 睡醒人躺在床上, 后续 waterAll/寻路全在床里空磨几十分钟(两次实测)。
-  //   /wakeup 对在床上的人 = 正确用法(传送到农场门口); 对没在床上的人才有瞬移副作用, 这里已用 isInBed 把门。
+  //   ⚠️主持(7842) 严禁 /wakeup(会把角色瞬移); 下床一律用 /warp Farm 64,15(实测能清 isInBed)。
   if ((await st()).player?.isInBed) {
-    log('晨间在床上, /wakeup 出床');
-    await post('/wakeup', {}).catch(() => { });
+    log('晨间在床上, warp 农场门口出床');
+    await warp('Farm', 64, 15).catch(() => { });
     await sleep(2000);
   }
   // 0. 先找木箱(农场→农舍都扫) + 清晨满包先清仓(带上箱子可存非卖品)
@@ -212,7 +217,9 @@ async function playOneDay(day) {
   if (!onBeach) log('warp 海滩没落地, 跳过钓鱼段(防田里抛竿)');
   if (onBeach) {
     // 2026-11-06 坑: 鱼竿名字写死 Bamboo Pole, 实际包里是 Fiberglass Rod → sel 失败举着种子钓一天
-    const rod = (await st()).inventory.find(i => /Rod|Pole/i.test(i?.name || ''));
+    // 2026-11-05 升级: 优先铱鱼竿(能挂饵/浮标), 没有再退回任意竿
+    const inv0 = (await st()).inventory;
+    const rod = inv0.find(i => /Iridium Rod/i.test(i?.name || '')) || inv0.find(i => /Rod|Pole/i.test(i?.name || ''));
     if (!rod) { log('没有鱼竿, 跳过钓鱼段'); }
     else {
     await sel(rod.name);
@@ -221,11 +228,54 @@ async function playOneDay(day) {
     log('fishbot ON =', await fishbotSet(true));
     let lastReport = '';
     let fishbotKeepalive = 0;
+    // ⭐2026-11-06 事故(Day21): 钓到宝箱拿到「高级鱼饵/铱矿石」后 currentItem 变 null, 竿不在手上;
+    //   fishbot 依然报 enabled=true、HUD 也写 "Fishbot active!" —— 但一整天 0 抛竿(体力 222 卡 7 小时、0 鱼)。
+    //   /state 的 rod.inHand=false 是唯一线索。修复: 每 200s 心跳里顺手校验"手里有竿", 没竿就重选;
+    //   再加一道停滞哨兵: 连续 10 次心跳 fishCaught/体力都没动 → fishbot 硬重启(off→on)+重选竿。
+    let lastFishCount = (await st()).player?.fishCaught ?? 0;
+    let lastStamMark = Math.round((await st()).player?.stamina ?? 0);
+    let stallTicks = 0;
     for (;;) {
       await sleep(20000);
       // 2026-11-06: fishbot 弹菜单后会自己罢工(视频验收抓到: 干站 5 小时无横幅) → 每 200s 强制拉回 ON
-      if (++fishbotKeepalive % 10 === 0) await fishbotSet(true);
+      if (++fishbotKeepalive % 10 === 0) {
+        const sc = await st();
+        if (!/Rod|Pole/i.test(sc.player?.currentItem || '')) {
+          const r = (sc.inventory || []).find(i => /Iridium Rod/i.test(i?.name || '')) || (sc.inventory || []).find(i => /Rod|Pole/i.test(i?.name || ''));
+          if (r) {
+            await sel(r.name);
+            await post('/face', { direction: 1 });
+            await sleep(300);
+            log('竿不在手 → 重选', r.name);
+          }
+        }
+        await fishbotSet(true);
+      }
       let s = await st();
+      // 停滞哨兵: 200s×10=~33 分钟后鱼数和体力都没动 = fishbot 假活, 硬重启一次
+      const fc = s.player?.fishCaught ?? 0, sm = Math.round(s.player?.stamina ?? 0);
+      if (fc === lastFishCount && sm === lastStamMark) {
+        if (++stallTicks >= 10) {
+          log('⚠️ 疑似卡钓(10 次心跳 0 鱼 0 体力变化) → fishbot 硬重启');
+          await fishbotSet(false).catch(() => { });
+          await sleep(1000);
+          const invR = (await st()).inventory || [];
+          const rr = invR.find(i => /Iridium Rod/i.test(i?.name || '')) || invR.find(i => /Rod|Pole/i.test(i?.name || ''));
+          if (rr) await sel(rr.name);
+          await post('/face', { direction: 1 });
+          await sleep(300);
+          await fishbotSet(true).catch(() => { });
+          stallTicks = 0;
+        }
+      } else { stallTicks = 0; lastFishCount = fc; lastStamMark = sm; }
+      // ⭐2026-11-05 事故(主持在床上躺一整天): host-night-guard 的兜底在"体力<20"时就把主持送睡,
+      //   而本循环的两个退出条件(时间≥23:00 / 体力<15)在换天后全部重置 —— 时间回到 6xx、体力回满 270,
+      //   于是循环永远不退出, 人躺在床上空转一整天(fishbot 钓空气)。跨天必须直接退出钓鱼段。
+      if (s.time.dayOfMonth !== day) {
+        log('天已经翻了(Day' + s.time.dayOfMonth + '), 退出钓鱼段(防跨天空转)');
+        await fishbotSet(false).catch(() => { });
+        return s;
+      }
       if (s.activeMenu && !/BobberBar/i.test(s.activeMenu.type)) {
         if (s.activeMenu.type === 'ItemGrabMenu') {
           const before = s.inventory.length;
@@ -243,6 +293,8 @@ async function playOneDay(day) {
         s = await st();
       }
       const report = s.inventory.map(i => i.name + 'x' + (i.stack ?? 1)).join(',');
+      // ⭐2026-11-06 巡检误判: 这行只在背包**有变化**时才打 → 空钓几分钟日志一片空白是正常的,
+      //   别当成卡死。判存活看 .day-loop.lock 的 mtime(60s 心跳) + /state 的 timeOfDay 在不在走。
       if (report !== lastReport) {
         log('时间', s.time.timeOfDay, '体力', Math.round(s.player.stamina), '|', report);
         lastReport = report;
@@ -259,7 +311,8 @@ async function playOneDay(day) {
         }
         const bw2 = await warp('Beach', 44, 35);
         if (!bw2.failed) {
-          const rod2 = (await st()).inventory.find(i => /Rod|Pole/i.test(i?.name || ''));
+          const inv2 = (await st()).inventory;
+          const rod2 = inv2.find(i => /Iridium Rod/i.test(i?.name || '')) || inv2.find(i => /Rod|Pole/i.test(i?.name || ''));
           if (rod2) await sel(rod2.name);
           await post('/face', { direction: 1 });
           await sleep(300);
@@ -289,16 +342,25 @@ async function playOneDay(day) {
   }
   for (let attempt = 0; attempt < 3; attempt++) {
     log(JSON.stringify(await warp('FarmHouse', 9, 9)));
-    // 联机(11-04): 睡前先叫醒协议——小鱼(7843 farmhand)先睡, 主持才能过全队ready-check
-    try { await fetch('http://localhost:7843/sleep', { method: 'POST' }); log('已通知小鱼先睡'); } catch { }
-    await sleep(6000);
+    const saveBefore = saveMtime();
+    // ⭐2026-11-06 存档事故根因: 原来是"小鱼先睡 → 主持后睡"。主持的 sleep ready 会从前一晚挂到第二天,
+    //   小鱼一睡就 2/2 直接换日, 主持自己的睡眠/存档流程根本没跑 → 冬3~冬8 连续 6 天没写盘。
+    //   正确顺序: 主持先睡(真实睡眠+ready), 再叫小鱼; 换日后必须校验 SaveGameInfo mtime 前进。
     const r = await post('/sleep', {}).catch(e => ({ error: String(e) }));
-    log('sleep:', JSON.stringify(r).slice(0, 150));
-    for (let i = 0; i < 12; i++) {
+    log('主持 sleep:', JSON.stringify(r).slice(0, 150));
+    await sleep(4000);
+    try { await fetch('http://localhost:7843/sleep', { method: 'POST' }); log('已通知小鱼睡'); } catch { }
+    for (let i = 0; i < 15; i++) {
       await sleep(4000);
       const s = await st();
       if (s.time.dayOfMonth > day) {
-        log('✓ 换天 Day' + s.time.dayOfMonth, '钱', s.player.money, '体力', Math.round(s.player.stamina));
+        // 换天瞬间还没写盘: 存档是 ShippingMenu 结算动画走完 → SaveGameMenu 才落盘(反编译 ShippingMenu.update).
+        // 这里原地等 mtime 前进(最长 75s), 别一看到换天就判"没写盘"(2026-11-05 Day6 误报).
+        let saveAfter = saveMtime();
+        for (let k = 0; k < 25 && saveAfter <= saveBefore; k++) { await sleep(3000); saveAfter = saveMtime(); }
+        const saved = saveAfter > saveBefore;
+        log('✓ 换天 Day' + s.time.dayOfMonth, '钱', s.player.money, '体力', Math.round(s.player.stamina),
+          saved ? `| ✓ 已存档 ${new Date(saveAfter).toLocaleTimeString('zh-CN')}` : '| ⚠️ 存档没写盘! 本条要查');
         return s;
       }
     }

@@ -244,11 +244,12 @@ export async function clearDeadCrops(p = SAVE_PATH) {
 
 // fishbot 设定到指定状态（/fishbot 是 toggle，必须校验 enabled 再决定是否补一刀）
 export async function fishbotSet(on) {
-  let r = await post('/fishbot', {});
-  if (r.enabled !== on) {
-    await sleep(300);
-    r = await post('/fishbot', {});
-  }
+  // ⭐2026-11-06 §54 根治: /fishbot 不带 action 就是 toggle。老实现 post({}) 盲翻两次,
+  //   看着"能对上", 实际每次调用都在开/关之间抖一下(和 fishbot 自己的状态机抢)。
+  //   唯一安全写法: action=status 读 → 不一致才 action=on/off 写。
+  const cur = await post('/fishbot', { action: 'status' });
+  if (!!cur.enabled === !!on) return cur.enabled;
+  const r = await post('/fishbot', { action: on ? 'on' : 'off' });
   return r.enabled;
 }
 
@@ -270,10 +271,13 @@ export function physicalRightClick(ax, ay) {
 
 // ================= 卖出白名单政策 (2026-10-28 用户拍板) =================
 // 原则: 只有白名单内的东西才卖; 白名单外一律 存木箱(没有箱子就留背包), 宁可停钓不可误卖
-const SELL_FISH = /\b(Bass|Trout|Catfish|Chub|Perch|Carp|Sunfish|Shad|Walleye|Bream|Pike|Eel|Sardine|Anchovy|Flounder|Halibut|Octopus|Squid|Snapper|Tuna|Cucumber|Stonefish|Ghostfish|Dorado|Blobfish|Slimejack|Pufferfish|Stingray|Lionfish|Salmon|Ice Pip|Lava Eel|Sandfish)\b/;
+const SELL_FISH = /\b(Bass|Trout|Catfish|Chub|Perch|Carp|Sunfish|Shad|Walleye|Bream|Pike|Eel|Sardine|Anchovy|Flounder|Halibut|Octopus|Squid|Snapper|Tuna|Albacore|Herring|Tilapia|Red Mullet|Sea Jelly|Mackerel|Sturgeon|Lingcod|Void Salmon|Super Cucumber|Midnight Carp|Woodskip|Tiger Trout|Cucumber|Stonefish|Ghostfish|Dorado|Blobfish|Slimejack|Pufferfish|Stingray|Lionfish|Salmon|Ice Pip|Lava Eel|Sandfish)\b/;
 const SELL_CROPS = /^(Parsnip|Strawberry|Cauliflower|Potato|Melon|Tomato|Blueberry|Hot Pepper|Pepper|Wheat|Corn|Eggplant|Pumpkin|Yam|Grape|Amaranth|Kale|Radish|Green Bean|Starfruit|Rhubarb|Hops|Tea Leaves|Unmilled Rice|Fiddlehead Fern|Cranberries|Sweet Gem Berry|Ancient Fruit)$/;
 const SELL_TRASH = /^(Trash|Driftwood|Soggy Newspaper|Broken CD|Broken Glasses|Joja Cola)$/;
-export const isSellable = n => SELL_FISH.test(n) || SELL_CROPS.test(n) || SELL_TRASH.test(n);
+// ⭐2026-11-05 政策漏洞(实测): SELL_FISH 里的 \bEel\b 会把「Spicy Eel 香辣鳗鱼」这种**熟菜**当成鱼,
+//   day-loop 收工卖货时把主持的 Spicy Eel×19 全部扔进出货箱。熟菜是体力补给, 一律不卖 → 显式排除。
+const COOKED_NOT_SELL = /^(Spicy Eel|Maki Roll|Sashimi|Sushi|Carp Surprise|Baked Fish|Fish Stew|Fish Taco|Trout Soup|Lobster Bisque|Chowder|Escargot|Fried Eel|Seafoam Pudding)$/i;
+export const isSellable = n => !COOKED_NOT_SELL.test(n) && (SELL_FISH.test(n) || SELL_CROPS.test(n) || SELL_TRASH.test(n));
 
 // 任务保留位(用户拍板"有邮件优先做任务"): 这些物品即使可卖也要留 N 件在背包
 // quest 101 = 乔迪要 1 花椰菜(10-29)
@@ -520,6 +524,13 @@ export async function chopWood(target = 50, staminaFloor = 40) {
   let chopped = 0;
   for (const t of trees) {
     if (chopped >= needed) break;
+    // ⭐2026-11-06 事故(Day22): needed 是"还差几块木头", 却被当成"砍几棵树"的上限用;
+    //   一棵树实际只掉 2~3 木(剩余散落要捡), 于是硬砍 38 棵、烧掉 180 体力(270→64)。
+    //   正解: 每砍 3 棵回读一次背包, 木头到 target 就停。
+    if (chopped && chopped % 3 === 0 && invCount(await st(), 'Wood') >= target) {
+      log('木头已够', target, ', 停手(已砍', chopped, '棵)');
+      break;
+    }
     for (let i = 0; i < 20; i++) {
       const s = await st();
       if (s.player.stamina < staminaFloor) { log('体力低停手'); return invCount(await st(), 'Wood'); }

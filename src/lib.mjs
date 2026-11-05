@@ -23,9 +23,13 @@
 //      (两条 SMAPI 日志都验证过"补丁已应用") → 游戏失焦照常 tick。
 const BASE = process.env.STARDEW_BASE || 'http://localhost:7842';
 import fs from 'node:fs';
+import zlib from 'node:zlib';
 import { execSync } from 'node:child_process';
 
-export const get = async (p) => (await fetch(BASE + p)).json();
+// 2026-11-06: 所有桥调用加超时 —— 曾因一个无超时 fetch 挂死整个 day-loop 半小时(主持躺床上没人管)
+export const FETCH_TIMEOUT = Number(process.env.STARDEW_FETCH_TIMEOUT || 30000);
+const fetchTO = (ms) => AbortSignal.timeout(ms);
+export const get = async (p) => (await fetch(BASE + p, { signal: fetchTO(FETCH_TIMEOUT) })).json();
 
 // ================= 行动日志 (star 项目 0.3.22 借鉴, 2026-10-30 落地) =================
 // 每个副作用动作都落 D:/StardewAI/action-journal.jsonl: {t,id,endpoint,body,result}
@@ -50,9 +54,10 @@ export function readJournal(n = 20) {
   } catch { return []; }
 }
 
-export const post = async (p, b = {}) => {
+export const post = async (p, b = {}, timeoutMs) => {
   const r = await (await fetch(BASE + p, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b)
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b),
+    signal: fetchTO(timeoutMs || FETCH_TIMEOUT)
   })).json();
   jour(p, b, r);
   return r;
@@ -125,6 +130,9 @@ export async function warp(loc, x, y, opts = {}) {
 
 // 浇半径内所有作物（自动 refill），返回成功数
 export async function waterAll(radius = 12) {
+  // 2026-11-06: 换日晕倒后人会在 FarmHouse 床里, 蛇形扫描对 48 块地逐块 8 次无效寻路 = 磨几十分钟假死
+  const s0 = await st();
+  if ((s0.location?.name || s0.location) !== 'Farm') { log('不在农场(' + (s0.location?.name || s0.location) + '), 跳过浇水(防床里死磨)'); return 0; }
   await sel('Watering Can');
   const sr = await surr(radius);
   // 只浇干土: watered=true 的格子保持到次日清晨, 重浇纯浪费(2026-10-29 用户指出)
@@ -159,13 +167,89 @@ export async function waterAll(radius = 12) {
   return ok;
 }
 
+// ================= 换季清死株 (2026-11-05 事故驱动) =================
+// 事故: 夏→秋换季那一刻农场上 43 株夏菜(种子 479甜瓜/480番茄/481蓝莓/482辣椒)全部枯死。
+//   死株不会自己消失, 一直占着那块 HoeDirt; 而 replantAll 只认 `!t.crop` 的格子 →
+//   从秋1 到秋19 整整十八个游戏日, 主持一颗种子都没种下去(收入全靠钓鱼), 用户看到"农作物都死了"。
+// 难点: 桥的 /surroundings 不暴露 crop.dead(只有 crop/cropPhase/harvestable/cropName),
+//   光看桥分不出"死株"和"没熟的活苗" —— 盲扫镰刀会把活苗一起割掉, 所以不能靠桥判断。
+// 出路: 死株名单只从存档 XML 读。存档恰好在每天起床那一刻才写(= day-loop 开跑的时刻),
+//   所以读它=读"今晨 6:00 的地面真相", 既精确又零误伤(只割 dead=true 的格子)。
+// ⚠️别改成"按 !harvestable 扫一遍": 没熟的活苗同样 !harvestable, 会连苗一起割。
+export const SAVE_PATH = process.env.STARDEW_SAVE
+  || 'C:/Users/Administrator/AppData/Roaming/StardewValley/Saves/肥鱼肥鱼_452739119/肥鱼肥鱼_452739119';
+
+// 读存档原文: 游戏有时压(PK zip)有时不压("Saving without compression" 那档), 两种都吃
+export function readSaveText(p = SAVE_PATH) {
+  const buf = fs.readFileSync(p);
+  if (buf[0] === 0x50 && buf[1] === 0x4b) {
+    const i = buf.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    if (i < 0) throw new Error('存档是 zip 但找不到本地文件头');
+    const nameLen = buf.readUInt16LE(i + 26), extraLen = buf.readUInt16LE(i + 28);
+    const start = i + 30 + nameLen + extraLen, compSize = buf.readUInt32LE(i + 18);
+    const method = buf.readUInt16LE(i + 8);
+    const raw = buf.subarray(start, start + compSize);
+    return (method === 0 ? raw : zlib.inflateRawSync(raw)).toString('utf8');
+  }
+  return buf.toString('utf8');
+}
+
+// 死株坐标(只取 Farm 地图块内的: 姜岛的够不着, 不列)
+// ⚠️别用 indexOf('xsi:type="Farm"') 找地图块起点 —— 存档里前面还有别的带这个属性的小节点,
+//   会切出一段不含作物的假 Farm 块(实测踩过: 切出 1474 字符的空块, 死株数=0)。
+//   正解: 用 <GameLocation xsi:type="X"> 的位置表, 取每条记录前面最近的那个地图名。
+export function deadCropTiles(p = SAVE_PATH) {
+  const t = readSaveText(p);
+  const heads = [...t.matchAll(/<GameLocation xsi:type="(\w+)"/g)].map(m => ({ i: m.index, name: m[1] }));
+  const locAt = (i) => { let n = '?'; for (const h of heads) { if (h.i < i) n = h.name; else break; } return n; };
+  const out = [];
+  const re = /<key><Vector2><X>(\d+)<\/X><Y>(\d+)<\/Y><\/Vector2><\/key><value>(.*?)<\/value><\/item>/gs;
+  for (const m of t.matchAll(re)) {
+    if (!m[3].includes('<dead>true</dead>')) continue;
+    if (locAt(m.index) !== 'Farm') continue;   // 只清主农场
+    out.push({ x: +m[1], y: +m[2] });
+  }
+  return out;
+}
+
+// 挥镰刀清死株, 返回清掉的格数; 没有死株=零开销直接返回
+export async function clearDeadCrops(p = SAVE_PATH) {
+  const tiles = deadCropTiles(p);
+  if (!tiles.length) { log('清死株: 存档里没有死株, 跳过'); return 0; }
+  log(`清死株: 存档里有 ${tiles.length} 株死株(换季枯死), 上镰刀`);
+  const before = (await get('/farm_report').catch(() => null))?.crops?.total;
+  const w = await warp('Farm', 65, 21);
+  if (w.failed) { log('清死株: 到不了农场, 放弃(别乱挥镰刀)'); return 0; }
+  tiles.sort((a, b) => (a.y - b.y) || (a.x - b.x));  // 蛇形: 同行连着割少跑路
+  let ok = 0;
+  for (const t of tiles) {
+    let done = false;
+    for (const [cx, cy] of [[t.x, t.y + 1], [t.x, t.y - 1], [t.x + 1, t.y], [t.x - 1, t.y]]) {
+      if (!(await go(cx, cy))) continue;
+      await sel('Scythe');            // 每格重选: 中途 /use 弹过菜单/换过手持就不认了
+      const c = await st();
+      await face(faceToward(c.player.x, c.player.y, t.x, t.y));
+      await sleep(120);
+      const r = await post('/use', {});
+      done = !!(r.tile && r.tile.x === t.x && r.tile.y === t.y);
+      break;
+    }
+    if (done) ok++; else log(`死株(${t.x},${t.y}) 没割掉(够不着?)`);
+    await sleep(120);
+  }
+  const after = (await get('/farm_report').catch(() => null))?.crops?.total;
+  log(`清死株: 挥镰 ${ok}/${tiles.length}, 农场地里作物 ${before} → ${after}(该到 0)`);
+  return ok;
+}
+
 // fishbot 设定到指定状态（/fishbot 是 toggle，必须校验 enabled 再决定是否补一刀）
 export async function fishbotSet(on) {
-  let r = await post('/fishbot', {});
-  if (r.enabled !== on) {
-    await sleep(300);
-    r = await post('/fishbot', {});
-  }
+  // ⭐2026-11-06 §54 根治: /fishbot 不带 action 就是 toggle。老实现 post({}) 盲翻两次,
+  //   看着"能对上", 实际每次调用都在开/关之间抖一下(和 fishbot 自己的状态机抢)。
+  //   唯一安全写法: action=status 读 → 不一致才 action=on/off 写。
+  const cur = await post('/fishbot', { action: 'status' });
+  if (!!cur.enabled === !!on) return cur.enabled;
+  const r = await post('/fishbot', { action: on ? 'on' : 'off' });
   return r.enabled;
 }
 
@@ -187,10 +271,13 @@ export function physicalRightClick(ax, ay) {
 
 // ================= 卖出白名单政策 (2026-10-28 用户拍板) =================
 // 原则: 只有白名单内的东西才卖; 白名单外一律 存木箱(没有箱子就留背包), 宁可停钓不可误卖
-const SELL_FISH = /\b(Bass|Trout|Catfish|Chub|Perch|Carp|Sunfish|Shad|Walleye|Bream|Pike|Eel|Sardine|Anchovy|Flounder|Halibut|Octopus|Squid|Snapper|Tuna|Cucumber|Stonefish|Ghostfish|Dorado|Blobfish|Slimejack|Pufferfish|Stingray|Lionfish|Salmon|Ice Pip|Lava Eel|Sandfish)\b/;
+const SELL_FISH = /\b(Bass|Trout|Catfish|Chub|Perch|Carp|Sunfish|Shad|Walleye|Bream|Pike|Eel|Sardine|Anchovy|Flounder|Halibut|Octopus|Squid|Snapper|Tuna|Albacore|Herring|Tilapia|Red Mullet|Sea Jelly|Mackerel|Sturgeon|Lingcod|Void Salmon|Super Cucumber|Midnight Carp|Woodskip|Tiger Trout|Cucumber|Stonefish|Ghostfish|Dorado|Blobfish|Slimejack|Pufferfish|Stingray|Lionfish|Salmon|Ice Pip|Lava Eel|Sandfish)\b/;
 const SELL_CROPS = /^(Parsnip|Strawberry|Cauliflower|Potato|Melon|Tomato|Blueberry|Hot Pepper|Pepper|Wheat|Corn|Eggplant|Pumpkin|Yam|Grape|Amaranth|Kale|Radish|Green Bean|Starfruit|Rhubarb|Hops|Tea Leaves|Unmilled Rice|Fiddlehead Fern|Cranberries|Sweet Gem Berry|Ancient Fruit)$/;
 const SELL_TRASH = /^(Trash|Driftwood|Soggy Newspaper|Broken CD|Broken Glasses|Joja Cola)$/;
-export const isSellable = n => SELL_FISH.test(n) || SELL_CROPS.test(n) || SELL_TRASH.test(n);
+// ⭐2026-11-05 政策漏洞(实测): SELL_FISH 里的 \bEel\b 会把「Spicy Eel 香辣鳗鱼」这种**熟菜**当成鱼,
+//   day-loop 收工卖货时把主持的 Spicy Eel×19 全部扔进出货箱。熟菜是体力补给, 一律不卖 → 显式排除。
+const COOKED_NOT_SELL = /^(Spicy Eel|Maki Roll|Sashimi|Sushi|Carp Surprise|Baked Fish|Fish Stew|Fish Taco|Trout Soup|Lobster Bisque|Chowder|Escargot|Fried Eel|Seafoam Pudding)$/i;
+export const isSellable = n => !COOKED_NOT_SELL.test(n) && (SELL_FISH.test(n) || SELL_CROPS.test(n) || SELL_TRASH.test(n));
 
 // 任务保留位(用户拍板"有邮件优先做任务"): 这些物品即使可卖也要留 N 件在背包
 // quest 101 = 乔迪要 1 花椰菜(10-29)
@@ -390,15 +477,21 @@ export async function findChest(radius = 18) {
 
 // 按名字存一件进木箱 (纯 HTTP, 不需要 UI)
 export async function storeToChest(name, chest) {
+  // 2026-11-05 坑: 箱满时 /store 假 ok(桥返回 ok 但物品没动) → 清仓循环拿种子在农场空转一整天(用户抓现行)。
+  // 铁律②: 存完必须重读背包, 确认真少了一件才算数。
+  const before = invCount(await st(), name);
   const r = await post('/store', { name, x: chest.x, y: chest.y });
-  return !r.error;
+  if (r.error) return false;
+  await sleep(300);
+  if (invCount(await st(), name) >= before) { log('存箱没生效(' + name + ') —— 箱子满了? 该换箱/做新箱'); return false; }
+  return true;
 }
 
 // 合成木箱 (需 50 木)
 // ⚠️ 10-29 血泪坑: 背包满时合成会 "item dropped" 掉地上! 合成前必须有空格
 export async function craftChest() {
   const s = await st();
-  if (s.inventory.filter(i => i.name).length >= 12) { log('背包满, 拒绝合成(防掉落)'); return false; }
+  if (s.inventory.filter(i => i.name).length >= (s.player.maxItems || 12)) { log('背包满, 拒绝合成(防掉落)'); return false; }  // 2026-11-05: 原写死12格, 联机背包36格被误判满
   const r = await post('/craft', { name: 'Chest' }).catch(e => ({ error: String(e) }));
   log('craft Chest →', JSON.stringify(r).slice(0, 150));
   return !r.error;
@@ -406,7 +499,7 @@ export async function craftChest() {
 
 // 把手上的箱子放到杂货箱(72,14)附近空地, 成功返回箱子坐标
 export async function placeChestNearHouse() {
-  const spots = [[71, 16], [70, 16], [73, 15], [71, 13], [73, 13], [70, 14]];
+  const spots = [[71, 16], [70, 16], [73, 15], [71, 13], [73, 13], [70, 14], [66, 16], [67, 16], [74, 16], [75, 15], [76, 15], [62, 16], [63, 16]];
   for (const [x, y] of spots) {
     const t = (await surr(14)).tiles.find(z => z.x === x && z.y === y);
     if (!t || t.object || t.crop || t.terrain === 'HoeDirt') continue;
@@ -431,6 +524,13 @@ export async function chopWood(target = 50, staminaFloor = 40) {
   let chopped = 0;
   for (const t of trees) {
     if (chopped >= needed) break;
+    // ⭐2026-11-06 事故(Day22): needed 是"还差几块木头", 却被当成"砍几棵树"的上限用;
+    //   一棵树实际只掉 2~3 木(剩余散落要捡), 于是硬砍 38 棵、烧掉 180 体力(270→64)。
+    //   正解: 每砍 3 棵回读一次背包, 木头到 target 就停。
+    if (chopped && chopped % 3 === 0 && invCount(await st(), 'Wood') >= target) {
+      log('木头已够', target, ', 停手(已砍', chopped, '棵)');
+      break;
+    }
     for (let i = 0; i < 20; i++) {
       const s = await st();
       if (s.player.stamina < staminaFloor) { log('体力低停手'); return invCount(await st(), 'Wood'); }
@@ -590,11 +690,27 @@ export async function sellAndStore(chest, force = false) {
       await warp(chest.loc, chest.x, chest.y + 1);
       await sleep(600);
     }
+    let chestRetried = false; // 2026-11-06: 箱满曾让 day-loop 僵尸循环 3 天 0 收入 → 满了自动做新箱
     for (let round = 0; round < 12; round++) {
       const it = (await st()).inventory.find(i => i.name && shouldStore(i.name));
       if (!it) break;
-      if (await storeToChest(it.name, chest)) { stored++; log('存箱', it.name); await sleep(400); }
-      else break;
+      if (await storeToChest(it.name, chest)) { stored++; log('存箱', it.name); await sleep(400); continue; }
+      if (!chestRetried) {
+        chestRetried = true;
+        const s3 = await st();
+        log('箱子满了, 尝试做新箱 (木头', invCount(s3, 'Wood') + ')');
+        if (invCount(s3, 'Wood') >= 50 && s3.inventory.filter(i => i.name).length < (s3.player.maxItems || 12)) {
+          await warp('Farm', 64, 15); // placeChestNearHouse 的备选点位都在农舍门口附近
+          await craftChest();
+          if ((await st()).inventory.some(i => i.name === 'Chest')) {
+            await sel('Chest');
+            const c2 = await placeChestNearHouse();
+            if (c2) { chest = { ...c2, loc: 'Farm' }; log('新箱已放 @', c2.x, c2.y); continue; }
+          }
+        }
+      }
+      log('存箱失败(没木头做新箱/放置失败), 停止重试(防空转)');
+      break;
     }
   }
   // 2026-11-05 改无点击: openBin 物理右键整套退休(源码实锤 /sell 直接塞出货箱, 零点击零前台)。

@@ -203,50 +203,206 @@ export function seeText(s, tiles) {
 // ============ 地标表 ============
 // who: 'host'=主持(i), 'fish'=小鱼(她) —— 同一个名字在她那边是不同的地方, 必须先按 who 选
 // verified: 'script'=历史脚本实测坐标 / 'guess'=推定(到不了会自动就近)
+// ⭐2026-11-05 全量地标表: 坐标全是反编译/实测得来的, 不再"猜"
+//   · 商店的 x,y = 店里的落点(从门的 LockedDoorWarp 里读到的, 一进门就站这儿)
+//     door = 外面那扇门的位置+营业时间(同一份数据), door.loc 是门所在的地图
+//   · 家的 building = 农场建筑左上角, 交给 /warp_building 精准进屋(两间 Cabin 同名, 只能靠坐标分辨)
+//   · cat: home 家 / field 农活 / shop 商店 / service 服务 / gate 通道 / place 景点 / npc 住家
 export const LANDMARKS = [
-  // --- 两个人各自的家 ---
-  { name: '家', alias: ['家里', '回家', '我的床', '睡觉的地方', '床'], loc: 'Cabin', x: 4, y: 9, who: 'fish', verified: 'script', mark: 'D' },
-  { name: '家', alias: ['家里', '回家', '我的床', '睡觉的地方', '床'], loc: 'FarmHouse', x: 9, y: 9, who: 'host', verified: 'script', mark: 'D' },
-  { name: '农舍门口', alias: ['门口', '出门'], loc: 'Farm', x: 64, y: 15, verified: 'script', mark: 'D' },
-  { name: '屋里柜子', alias: ['柜子', '木箱'], loc: 'FarmHouse', x: 3, y: 11, who: 'host', verified: 'script' },
-  // --- 农场 ---
-  { name: '农田', alias: ['田', '田边', '菜地', '田里'], loc: 'Farm', x: 66, y: 20, who: 'host', verified: 'script', mark: 'F' },
-  { name: '出货箱', alias: ['杂货箱', '卖东西的地方', '卖东西'], loc: 'Farm', x: 72, y: 14, stand: [72, 15], who: 'host', verified: 'script', mark: 'B' },
-  { name: '农场南边', alias: ['南边空地'], loc: 'Farm', x: 60, y: 24, verified: 'script' },
-  { name: '农场北边', alias: ['北边'], loc: 'Farm', x: 64, y: 12, verified: 'guess' },
-  { name: '农场西南角', alias: ['西南'], loc: 'Farm', x: 52, y: 28, verified: 'guess' },
-  // --- 镇子/海滩/山 ---
-  { name: '镇子', alias: ['镇上', '广场', '村里'], loc: 'Town', x: 50, y: 57, verified: 'script', mark: 'D' },
-  { name: '海滩', alias: ['海边', '沙滩', '海'], loc: 'Beach', x: 44, y: 35, verified: 'script', mark: 'D' },
-  { name: '公交站', alias: ['车站', 'bus'], loc: 'BusStop', x: 20, y: 12, verified: 'guess', mark: 'D' },
-  { name: '山里', alias: ['山', '矿洞', '矿洞口', '矿井'], loc: 'Mountain', x: 30, y: 20, verified: 'guess', mark: 'D' },
-  { name: '森林', alias: ['南森林', '林子'], loc: 'Forest', x: 56, y: 82, verified: 'guess', mark: 'D' },
+  // ==================== 家 ====================
+  { name: '小鱼的家', alias: ['家', '回家', '我的家', '我的小屋', '小屋', '我的床', '床', '睡觉的地方', '回屋', '自己家'], who: 'fish',
+    loc: 'Cabin', x: 9, y: 8, building: { bx: 50, by: 14 }, door: { loc: 'Farm', x: 52, y: 15 }, cat: 'home', mark: 'H',
+    note: '床在(9,8); 门口在农场(52,15)' },
+  { name: '家', alias: ['家', '回家', '我的床', '睡觉的地方', '床', '回屋'], who: 'host',
+    loc: 'FarmHouse', x: 9, y: 9, building: { bx: 59, by: 12 }, door: { loc: 'Farm', x: 64, y: 14 }, cat: 'home', mark: 'H' },
+  { name: '农舍门口', alias: ['门口', '出门', '农场门口'], loc: 'Farm', x: 64, y: 15, cat: 'home', mark: 'H' },
+  { name: '屋里柜子', alias: ['柜子', '木箱'], who: 'host', loc: 'FarmHouse', x: 3, y: 11, cat: 'home' },
+  // ==================== 农场 ====================
+  { name: '农田', alias: ['田', '田边', '菜地', '田里', '农场', '地里'], loc: 'Farm', x: 66, y: 20, cat: 'field', mark: 'F' },
+  { name: '出货箱', alias: ['杂货箱', '卖东西的地方', '卖东西', '出货'], loc: 'Farm', x: 72, y: 14, stand: [72, 15], cat: 'service', mark: 'B' },
+  { name: '温室', alias: ['大棚', '玻璃房'], loc: 'Greenhouse', x: 10, y: 24, building: { bx: 25, by: 10 }, door: { loc: 'Farm', x: 28, y: 15 }, cat: 'field', mark: 'G' },
+  { name: '农场南门', alias: ['南边', '农场南边', '去森林', '森林入口'], loc: 'Farm', x: 40, y: 64, cat: 'gate', mark: 'E', note: '走出去是森林' },
+  { name: '农场北门', alias: ['北边', '农场北边', '后山', '上山'], loc: 'Farm', x: 40, y: 1, cat: 'gate', mark: 'E', note: '走出去是后山/山里' },
+  { name: '农场东门', alias: ['东边', '农场东边', '去公交站'], loc: 'Farm', x: 79, y: 16, cat: 'gate', mark: 'E', note: '走出去是公交站' },
+  // ==================== 镇子 ====================
+  { name: '镇中心', alias: ['镇上', '镇子', '广场', '村里', '去镇上', '镇中心广场'], loc: 'Town', x: 50, y: 57, cat: 'place', mark: 'D' },
+  { name: '皮埃尔的杂货店', alias: ['杂货店', '种子店', '皮埃尔', '买种子', '种子', '肥料', '背包', '小卖部'], loc: 'SeedShop', x: 6, y: 29,
+    door: { loc: 'Town', x: 43, y: 56, hours: [900, 2100] }, cat: 'shop', mark: 'S', note: '柜台(5,18): 卖种子/肥料, 还能升级背包; 店里有阳光房(32,3)' },
+  { name: '哈维诊所', alias: ['诊所', '医院', '医生', '哈维', '看病', '买药'], loc: 'Hospital', x: 10, y: 19,
+    door: { loc: 'Town', x: 36, y: 55, hours: [900, 1500] }, cat: 'shop', mark: 'S', note: '柜台(6,16): 卖药和能量补剂' },
+  { name: '星之果实酒吧', alias: ['酒吧', '酒馆', '格斯', '吃饭', '买酒', '餐厅'], loc: 'Saloon', x: 14, y: 24,
+    door: { loc: 'Town', x: 45, y: 70, hours: [1200, 2400] }, cat: 'shop', mark: 'S', note: '柜台(10,19): 买吃的/配方; 中午12点才开门' },
+  { name: '铁匠铺', alias: ['铁匠', '克林特', '升级工具', '敲晶石', '砸矿', '买矿石'], loc: 'Blacksmith', x: 5, y: 19,
+    door: { loc: 'Town', x: 94, y: 81, hours: [900, 1600] }, cat: 'shop', mark: 'S', note: '柜台(3,14): 升级工具/砸晶石/买煤和矿石' },
+  { name: '博物馆', alias: ['图书馆', '博物馆', '冈瑟', '捐东西', '捐献', '图书'], loc: 'ArchaeologyHouse', x: 3, y: 14,
+    door: { loc: 'Town', x: 101, y: 89, hours: [800, 1800] }, cat: 'shop', mark: 'S', note: '冈瑟(3,9)/捐赠箱(6,9): 交矿物和古物' },
+  { name: '艾米丽家(裁缝)', alias: ['裁缝铺', '裁缝', '艾米丽', '艾米丽家', '做衣服', '缝纫机', '改衣服', '布料'], loc: 'HaleyHouse', x: 2, y: 24,
+    door: { loc: 'Town', x: 20, y: 88, hours: [900, 2000] }, cat: 'service', mark: 'S', note: '裁缝机在(12,23): 拿布料+衣服/物件去改; 海莉和艾米丽住这儿' },
+  { name: '山姆家', alias: ['山姆', '山姆家', '文森特'], loc: 'SamHouse', x: 4, y: 23,
+    door: { loc: 'Town', x: 10, y: 85, hours: [900, 2000] }, cat: 'npc' },
+  { name: '亚历克斯家', alias: ['亚历克斯', '阿历克斯', '乔希家'], loc: 'JoshHouse', x: 9, y: 24,
+    door: { loc: 'Town', x: 57, y: 63, hours: [800, 2000] }, cat: 'npc' },
+  { name: '镇长家', alias: ['镇长', '刘易斯', '刘易斯家', '领奖'], loc: 'ManorHouse', x: 4, y: 11,
+    door: { loc: 'Town', x: 58, y: 85, hours: [830, 2200] }, cat: 'service', note: '领奖机(1,5): 交任务奖励; 失物招领(4,5)' },
+  { name: '潘妮家', alias: ['潘妮', '拖车', '潘姆'], loc: 'Trailer', x: 12, y: 9,
+    door: { loc: 'Town', x: 72, y: 68, hours: [900, 2000] }, cat: 'npc' },
+  { name: 'Joja超市', alias: ['joja', 'Joja', '乔家', '超市', '乔佳超市'], loc: 'JojaMart', x: 13, y: 29,
+    door: { loc: 'Town', x: 95, y: 50, hours: [900, 2300] }, cat: 'shop', note: '柜台(10,24); 里面还能办Joja会员' },
+  { name: '社区中心', alias: ['社区', '献祭', '收集包', '社区中心'], loc: 'CommunityCenter', x: 32, y: 23,
+    door: { loc: 'Town', x: 53, y: 19 }, cat: 'service', note: '交收集包的地方; 门在镇子北边(53,19)' },
+  { name: '下水道', alias: ['下水道', '科罗布斯', '小黑'], loc: 'Sewer', x: 16, y: 11,
+    door: { loc: 'Town', x: 34, y: 95 }, cat: 'shop', note: '入口在镇子南边井盖(34,95); 科罗布斯卖东西(需先拿生锈钥匙)' },
+  { name: '镇子南门(海滩)', alias: ['海滩入口', '去海滩', '南门'], loc: 'Town', x: 54, y: 108, cat: 'gate', mark: 'E', note: '走出去是海滩' },
+  { name: '镇子西门(公交站)', alias: ['镇子西门', '去公交站'], loc: 'Town', x: 1, y: 54, cat: 'gate', mark: 'E', note: '走出去是公交站' },
+  { name: '镇子北门(山里)', alias: ['镇子北门', '去山里'], loc: 'Town', x: 80, y: 1, cat: 'gate', mark: 'E', note: '走出去是山里' },
+  { name: '镇子西南(森林)', alias: ['镇子西南门', '去森林'], loc: 'Town', x: 1, y: 90, cat: 'gate', mark: 'E', note: '走出去是森林' },
+  // ==================== 山里 ====================
+  { name: '山里', alias: ['山', '山区', '山脚', '去山里'], loc: 'Mountain', x: 30, y: 30, cat: 'place', mark: 'D' },
+  { name: '罗宾木匠铺', alias: ['木匠', '木匠铺', '罗宾', '建房子', '升级房子', '买家具', '造建筑'], loc: 'ScienceHouse', x: 6, y: 24,
+    door: { loc: 'Mountain', x: 12, y: 25, hours: [900, 2000] }, cat: 'shop', note: '柜台(8,19): 建建筑/升级房子/买家具; 隔壁门(8,20)是玛鲁房间' },
+  { name: '探险家公会', alias: ['公会', '探险家', '马龙', '买武器', '打怪', '冒险者公会'], loc: 'AdventureGuild', x: 6, y: 19,
+    door: { loc: 'Mountain', x: 76, y: 8, hours: [1400, 2600] }, cat: 'shop', note: '下午2点才开门; 卖武器/戒指, 还能找回死掉丢的东西' },
+  { name: '矿洞', alias: ['矿洞', '矿井', '下矿', '矿洞口', 'mine'], loc: 'Mine', x: 18, y: 13,
+    door: { loc: 'Mountain', x: 54, y: 4 }, cat: 'place', mark: 'M', note: '电梯在(17,3); 越往下越危险, 记得带吃的' },
+  { name: '莱纳斯帐篷', alias: ['莱纳斯', '帐篷', '流浪汉'], loc: 'Tent', x: 2, y: 5,
+    door: { loc: 'Mountain', x: 29, y: 6 }, cat: 'npc' },
+  { name: '温泉', alias: ['温泉', '浴场', '泡澡', '回体力', '澡堂'], loc: 'BathHouse_Entry', x: 5, y: 9,
+    door: { loc: 'Railroad', x: 10, y: 56 }, cat: 'service', note: '泡温泉能免费回体力(男女更衣室各一边)' },
+  { name: '山顶', alias: ['山顶', 'summit'], loc: 'Summit', x: 10, y: 29, door: { loc: 'Railroad', x: 33, y: 0 }, cat: 'place' },
+  // ==================== 森林 ====================
+  { name: '森林', alias: ['森林', '林子', '南森林', '去森林'], loc: 'Forest', x: 56, y: 82, cat: 'place', mark: 'D' },
+  { name: '玛妮牧场', alias: ['牧场', '玛妮', '买动物', '买鸡', '买牛', '买干草', '动物店'], loc: 'AnimalShop', x: 13, y: 19,
+    door: { loc: 'Forest', x: 90, y: 15, hours: [900, 1800] }, cat: 'shop', note: '柜台(12,15): 买动物/干草/挤奶器' },
+  { name: '巫师塔', alias: ['巫师', '法师', '巫师塔', '魔法', 'rasmodius'], loc: 'WizardHouse', x: 8, y: 24,
+    door: { loc: 'Forest', x: 5, y: 26, hours: [600, 2300] }, cat: 'service', note: '魔法书(2,13): 后期能改名字/买魔法建筑' },
+  { name: '莉亚家', alias: ['莉亚', '莉亚家', '雕塑'], loc: 'LeahHouse', x: 7, y: 9,
+    door: { loc: 'Forest', x: 104, y: 32, hours: [1000, 1800] }, cat: 'npc' },
+  { name: '秘密森林', alias: ['秘密森林', '深林', '老林', '硬木'], loc: 'Woods', x: 59, y: 15, door: { loc: 'Forest', x: 0, y: 7 }, cat: 'place', note: '里面有大树桩(硬木)和 Old Master 雕像; 入口在森林最西边' },
+  { name: '专精洞', alias: ['专精', '专精洞', '大师'], loc: 'MasteryCave', x: 5, y: 8, door: { loc: 'Forest', x: 101, y: 72 }, cat: 'service', note: '五项技能全满后解锁' },
+  // ==================== 海滩 ====================
+  { name: '海滩', alias: ['海边', '沙滩', '海', '去海边'], loc: 'Beach', x: 44, y: 35, cat: 'place', mark: 'D' },
+  { name: '威利鱼店', alias: ['鱼店', '威利', '买鱼竿', '买鱼饵', '卖鱼'], loc: 'FishShop', x: 5, y: 9,
+    door: { loc: 'Beach', x: 30, y: 33, hours: [900, 1700] }, cat: 'shop', note: '柜台(5,5): 卖鱼竿/鱼饵/蟹笼; 船坞(4,3)通鱼市场' },
+  { name: '艾利欧特家', alias: ['艾利欧特', '作家', '海边小屋'], loc: 'ElliottHouse', x: 3, y: 9,
+    door: { loc: 'Beach', x: 49, y: 10, hours: [1000, 1800] }, cat: 'npc' },
+  // ==================== 公交站/后山/铁路/沙漠 ====================
+  { name: '公交站', alias: ['车站', '公交站', 'bus', '巴士站'], loc: 'BusStop', x: 42, y: 23, cat: 'place', mark: 'D' },
+  { name: '去沙漠的巴士', alias: ['巴士', '去沙漠', '沙漠巴士'], loc: 'BusStop', x: 22, y: 8, cat: 'gate', note: '巴士修好后能去沙漠(要买票)' },
+  { name: '后山', alias: ['后山', '后山小路'], loc: 'Backwoods', x: 14, y: 39, cat: 'place' },
+  { name: '隧道', alias: ['隧道', '地下通道'], loc: 'Tunnel', x: 39, y: 9, door: { loc: 'Backwoods', x: 22, y: 30 }, cat: 'place' },
+  { name: '铁路', alias: ['铁路', '火车站'], loc: 'Railroad', x: 29, y: 60, cat: 'place' },
+  { name: '沙漠', alias: ['沙漠', '沙地', '绿洲'], loc: 'Desert', x: 18, y: 27, cat: 'place', mark: 'D' },
+  { name: '桑迪家', alias: ['桑迪', '绿洲商店', '沙漠商店'], loc: 'SandyHouse', x: 4, y: 9,
+    door: { loc: 'Desert', x: 6, y: 51, hours: [900, 2350] }, cat: 'shop', note: '沙漠的种子店(桑迪看店)' },
+  { name: '骷髅洞', alias: ['骷髅洞', '沙漠矿洞', '骷髅钥匙'], loc: 'SkullCave', x: 7, y: 8,
+    door: { loc: 'Desert', x: 8, y: 5 }, cat: 'place' },
+  // ==================== 店内柜台(进店后直接走过去) ====================
+  { name: '皮埃尔柜台', alias: ['买种子的地方', '杂货柜台'], loc: 'SeedShop', x: 5, y: 18, cat: 'spot' },
+  { name: '裁缝机', alias: ['缝纫机', '改衣服的地方'], loc: 'HaleyHouse', x: 13, y: 23, cat: 'spot' },
+  { name: '铁匠柜台', alias: ['砸晶石的地方', '升级工具的地方'], loc: 'Blacksmith', x: 3, y: 14, cat: 'spot' },
+  { name: '酒吧柜台', alias: ['点菜', '买吃的地方'], loc: 'Saloon', x: 10, y: 19, cat: 'spot' },
+  { name: '诊所柜台', alias: ['买药的地方'], loc: 'Hospital', x: 6, y: 16, cat: 'spot' },
+  { name: '博物馆柜台', alias: ['捐东西的地方', '冈瑟柜台'], loc: 'ArchaeologyHouse', x: 3, y: 9, cat: 'spot' },
+  { name: '木匠柜台', alias: ['建房子的地方'], loc: 'ScienceHouse', x: 8, y: 19, cat: 'spot' },
+  { name: '牧场柜台', alias: ['买动物的柜台'], loc: 'AnimalShop', x: 12, y: 15, cat: 'spot' },
+  { name: '鱼店柜台', alias: ['买鱼竿的地方'], loc: 'FishShop', x: 5, y: 5, cat: 'spot' },
+  { name: 'Joja柜台', alias: ['joja买东西'], loc: 'JojaMart', x: 10, y: 24, cat: 'spot' },
+  { name: '巫师魔法书', alias: ['魔法书', '巫师书'], loc: 'WizardHouse', x: 2, y: 13, cat: 'spot' },
 ];
+
+// 地图英文名 → 人话(她问"地图 XX"时, XX 可能是地图也可能是地标)
+export const MAP_CN = {
+  Farm: '农场', FarmHouse: '农舍', Cabin: '小屋', Greenhouse: '温室', Cellar: '地窖',
+  Town: '镇子', Beach: '海滩', Forest: '森林', Mountain: '山里', BusStop: '公交站',
+  Backwoods: '后山', Railroad: '铁路', Desert: '沙漠', Woods: '秘密森林', Tunnel: '隧道',
+  Mine: '矿洞', SkullCave: '骷髅洞', Sewer: '下水道', CommunityCenter: '社区中心',
+  SeedShop: '皮埃尔杂货店', Blacksmith: '铁匠铺', Hospital: '诊所', Saloon: '酒吧',
+  ArchaeologyHouse: '博物馆', HaleyHouse: '艾米丽家', SamHouse: '山姆家', JoshHouse: '亚历克斯家',
+  ManorHouse: '镇长家', Trailer: '潘妮家', JojaMart: 'Joja超市', ScienceHouse: '木匠铺',
+  AdventureGuild: '探险家公会', AnimalShop: '玛妮牧场', WizardHouse: '巫师塔', LeahHouse: '莉亚家',
+  FishShop: '威利鱼店', ElliottHouse: '艾利欧特家', SandyHouse: '桑迪家', Tent: '莱纳斯帐篷',
+  BathHouse_Entry: '温泉', Summit: '山顶', MasteryCave: '专精洞', MovieTheater: '电影院',
+  BoatTunnel: '船坞', Sunroom: '阳光房', Quarry: '采石场', HatShop: '帽子店',
+};
+export const mapCN = (loc) => MAP_CN[loc] || loc || '?';
 
 export function findLandmark(word, who = 'fish') {
   if (!word) return null;
   const w = String(word).trim();
   const hit = (l) => l.name === w || (l.alias || []).includes(w);
-  const fuzzy = (l) => w.includes(l.name) || (l.alias || []).some((a) => w.includes(a));
-  // ① 名字/别名精确命中, 且属于我 → 直接采纳
+  // 模糊: 名字更长的优先(不然"裁缝"会先撞上"裁缝机")
+  const fuzzyHit = (l) => (l.alias || []).some((a) => w.includes(a)) || w.includes(l.name);
   const own = LANDMARKS.filter((l) => !l.who || l.who === who);
-  const me = own.find(hit);
-  if (me) return me;
-  // ② 模糊命中(研究"去田边看看"这种整句), 也先看自己那份
-  const meF = own.find(fuzzy);
-  if (meF) return meF;
-  // ③ 别人独有的地名(比如小鱼说"出货箱"其实也只有农场上那一个) → 用它, 但标不是自己家
-  return LANDMARKS.find(hit) || LANDMARKS.find(fuzzy) || null;
+  const others = LANDMARKS.filter((l) => l.who && l.who !== who);
+  for (const pool of [own, others]) {
+    const me = pool.find(hit);
+    if (me) return me;
+  }
+  const cands = [...own, ...others].filter(fuzzyHit);
+  if (cands.length) {
+    // 同分时取 alias 命中最长的那个(更具体)
+    const score = (l) => Math.max(...(l.alias || []).filter((a) => w.includes(a)).map((a) => a.length), l.name.length);
+    return cands.sort((a, b) => score(b) - score(a))[0];
+  }
+  return null;
 }
 export const homeOf = (who) => findLandmark('家', who);
 
+// ============ 营业时间 ============
+export function hoursText(h) {
+  if (!h || !h.length) return '';
+  const t = (v) => `${Math.floor(v / 100)}:${String(v % 100).padStart(2, '0')}`;
+  const close = h[1] >= 2400 ? '24:00' : (h[1] > 2400 ? `${Math.floor((h[1] - 2400) / 100)}:${String((h[1] - 2400) % 100).padStart(2, '0')}(次日)` : t(h[1]));
+  return `${t(h[0])}-${close}`;
+}
+export function openNow(h, timeOfDay) {
+  if (!h || !h.length) return null;
+  let t = Number(timeOfDay || 0);
+  if (t < 600) t += 2400; // 凌晨算前一天营业时间(酒吧 12:00-24:00)
+  const [o, c] = h;
+  if (c >= 2400) return t >= o || t < (c - 2400);
+  return t >= o && t < c;
+}
+
+// 一张图里的地标(按类别排序, 给"地图 XX"列表用)
+export function placesInMap(loc, who = 'fish') {
+  const order = { home: 0, gate: 1, field: 2, shop: 3, service: 4, place: 5, npc: 6, spot: 7 };
+  const list = LANDMARKS.filter((l) => l.loc === loc && (!l.who || l.who === who));
+  return list.sort((a, b) => (order[a.cat] ?? 9) - (order[b.cat] ?? 9) || a.name.localeCompare(b.name));
+}
+// 地标的一句话介绍(含门的位置/营业时间)
+export function placeLine(l, timeOfDay) {
+  const bits = [];
+  if (l.door) {
+    const h = hoursText(l.door.hours);
+    const open = openNow(l.door.hours, timeOfDay);
+    bits.push(`门在${mapCN(l.door.loc)}(${l.door.x},${l.door.y})${h ? ` 营业${h}${open === false ? ' ⚠️现在关着' : ''}` : ''}`);
+  }
+  if (l.note) bits.push(l.note);
+  return `${l.name} (${l.loc} ${l.x},${l.y})${bits.length ? ' — ' + bits.join('; ') : ''}`;
+}
+
 // ============ 世界方位(她的"哪边是海"用这张表) ============
-export const WORLD = `世界怎么走(以农场为中心):
-  家(农舍)在农场北边, 出门往南 = 农田; 出货箱在农舍东边
-  农场往西 → 公交站; 从公交站往北 → 山里(矿洞), 往东北 → 镇子
-  镇子往西南 = 海滩(海在世界最西南角)
-  农场往南 → 森林(秘密森林在更西南)
-  一句话: 家在正北, 田在正南, 箱在正东, 海在西南, 矿在北边山里`;
+export const WORLD = `世界怎么走(整张地图的路, 全是从游戏传送表读出来的):
+  农场: 西/东? → 东边(80,16)出去=公交站; 南边(40,65)=森林; 北边(40,0)=后山
+  公交站: 东边(44,23)出去=镇子; 巴士(22,8)=沙漠(修好巴士才能坐)
+  镇子: 西边(0,54)=公交站; 北边(80,0)=山里; 南边(54,108)=海滩; 西南(0,90)=森林
+  山里: 南边(15,41)=镇子; 北边(9,0)=铁路; 西边(0,13)=后山; (54,4)=矿洞
+  森林: 东边(120,25)=镇子; 北边(68,0)=农场; 最西边(0,7)=秘密森林
+  海滩: 北边(39,0)=镇子
+  一句话: 家在北, 田在南, 箱在东; 海在最南(海滩), 矿在北边山里, 裁缝/商店都在镇子`;
+
+// ============ 点名的别名(直接说地图/区域名也能认) ============
+export const AREA_ALIAS = {
+  农场: 'Farm', 农舍: 'FarmHouse', 家里: 'FarmHouse', 温室: 'Greenhouse',
+  镇子: 'Town', 镇上: 'Town', 村子: 'Town', 小镇: 'Town',
+  海滩: 'Beach', 海边: 'Beach', 沙滩: 'Beach',
+  森林: 'Forest', 林子: 'Forest',
+  山里: 'Mountain', 山区: 'Mountain', 山上: 'Mountain',
+  公交站: 'BusStop', 车站: 'BusStop',
+  后山: 'Backwoods', 铁路: 'Railroad', 火车站: 'Railroad',
+  沙漠: 'Desert', 秘密森林: 'Woods', 下水道: 'Sewer', 矿洞: 'Mine', 矿井: 'Mine',
+};
 
 // ============ 种子别名 ============
 export const SEEDS = {
@@ -281,7 +437,14 @@ export function parseCmd(cmd) {
   if (/农场怎么样|全农场|田里怎么样|多少株|浇了多少/.test(c)) return { op: 'farm' };
   if (/卡床|赖床|起不来|没天亮|睡过头|天亮不了/.test(c)) return { op: 'breakloop' };
   if (/催熟|强行熟|直接熟/.test(c)) return { op: 'ripen' };
-  if (/地图|画个图/.test(c)) return { op: 'map' };
+  // ⭐2026-11-05 地图带地点: "地图 镇上"/"地图 裁缝铺"/"裁缝铺在哪" 都要能答
+  const mp = c.match(/^(?:地图|画个图|看看地图)\s*(.*)$/);
+  if (mp) return { op: 'map', to: mp[1].trim() };
+  if (/^(?:出去|怎么出去|出去怎么走|带我出去|离开这里)$/.test(c)) return { op: 'leave' };
+  const whereQ = c.match(/^(?:怎么去|怎么走到|怎样去|去哪里是|在哪|哪儿是)\s*(.+)$/);
+  if (whereQ) return { op: 'goto', to: whereQ[1].trim() };
+  const whereS = c.match(/^([^\s,，。]+?)(在哪|在哪里|怎么走|怎么去|在什么地方)$/);
+  if (whereS) return { op: 'goto', to: whereS[1] };
   if (/水壶|还有多少水|剩多少水/.test(c)) return { op: 'watercan' };
   if (/^(看看|状态|我在哪|情况)|看看周围|怎么回事/.test(c)) return { op: 'see' };
   if (/该干嘛|干嘛|不知道做什么|做什么好|无聊/.test(c)) return { op: 'todo' };
