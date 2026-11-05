@@ -1492,3 +1492,13 @@ POST /rod  {"action":"show"}                // 看当前挂的饵/浮标
 - **验收**：`_smoke-extra.mjs` 72 个只读端点实机回归 = 69 OK + 3 个预期业务错 + 0 真失败。
 - **改文档/注记要改生成器再重跑**，直接改 `lib-extra.mjs` 会被下次生成覆盖。
 - 生成器自己的坑：手册表格解析要剥反引号（routeCell 带 \`\`），参数串和描述要用"纯标识符"启发式分开，否则描述列会被 `location,x,y` 这类参数串顶掉。
+
+### §62.2 已接进运行脚本的两处（2026-11-06 晚）
+
+1. **`newday-trigger.mjs` → `/levelup_choose` 自动选专精**（原逻辑是强关 `LevelUpMenu`，等于随机专精；冬7 鱼鱼就是这么被默认成 **7=Trapper** 的）。
+   现在换日清菜单时读 `activeMenu.levelUp`（`{isProfessionChooser,skill,skillName,level,offered:[{id,name}]}`）：
+   - `isProfessionChooser && offered>=2` → 按偏好表选 `profession`，成功后菜单自己关（handler 里 `isActive=false`）；
+   - 普通升级（2–4/6–9，无分支）→ 仍旧 `/menu_close`。
+   - 偏好表（**已按 `LevelUpMenu.getProfessionName` 源码逐 id 核对**）：farming `1 Tiller→4 Artisan`；fishing `6 Fisher→8 Angler`；foraging `13 Gatherer→16 Botanist`（⚠️15 是 Tapper，不是 Botanist）；mining `18 Miner→21 Prospector`；combat `24 Fighter→26 Brute`。10 级用第二档，缺省回退到"offered 里任一偏好项"，再不行取 offered[0] 并记日志。
+2. **`lock-fish-keep.mjs` → `/fish_areas` 自动换钓点**：假活哨兵连续两轮硬重启（≈4 分钟）都不上鱼时，调 `/fish_areas` 取 `spots[{waterX,waterY,standX,standY}]`，按曼哈顿距离挑最近的可站格 → `warp` → 面朝水格 → 挂饵 → 重开 fishbot；warp 没落地就退回原逻辑。连续上鱼会清零"换点计数"。
+

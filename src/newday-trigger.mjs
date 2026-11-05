@@ -92,6 +92,28 @@ async function readState(base) {
 }
 
 // 换日卡菜单处置: 只关"睡觉 ready"这层; 结算菜单点 OK 让它把存档走完; 写盘中只等
+const jjPost = (base, path, body) => jj(base, path, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}),
+});
+
+// 2026-11-06 接 /levelup_choose: 职业分支不再强关(强关=随机专精; 冬7 鱼鱼被默认成 7=捕猎者)
+// /state 的 activeMenu.levelUp = {isProfessionChooser, skill, skillName, level, offered:[{id,name}]}
+const PROF_PREF = {
+  0: [1, 4],   // farming: Tiller(农耕人) → Artisan(工匠)
+  1: [6, 8],   // fishing: Fisher(渔夫) → Angler(垂钓者)
+  2: [13, 16], // foraging: Gatherer(采集者) → Botanist(植物学家); ⚠️15 是 Tapper, 16 才是 Botanist(源码 LevelUpMenu.getProfessionName 核对)
+  3: [18, 21], // mining: Miner(矿工) → Prospector(探矿者)
+  4: [24, 26], // combat: Fighter(战士) → Brute(蛮力)
+};
+function pickProfession(lu) {
+  const offered = (lu?.offered || []).map(o => o.id);
+  const prefs = PROF_PREF[lu?.skill] || [];
+  const want = prefs[lu?.level >= 10 ? 1 : 0]; // 5 级选第一档, 10 级选第二档
+  if (want != null && offered.includes(want)) return want;
+  const any = offered.find(id => prefs.includes(id));
+  return any ?? (offered.length ? offered[0] : null);
+}
+
 async function settleNewDayMenus(base, tag) {
   const done = [];
   for (let i = 0; i < 10; i++) {
@@ -123,13 +145,33 @@ async function settleNewDayMenus(base, tag) {
       await new Promise(r => setTimeout(r, 2500));
       continue;
     }
-    // 升级菜单挡 ready(2026-11-06 冬7 死锁): 只能关掉。会自动落到某个专精(实测鱼鱼落到 7=捕猎者),
-    // 想换回渔夫去下水道「不确定性雕像」花 10k 重选 —— 但总比整晚不存档强。
+    // 升级菜单挡 ready(2026-11-06 冬7 死锁)。2026-11-06 接入 /levelup_choose:
+    //   职业分支(5/10 级)按偏好表选, 不再强关(强关=随机专精, 鱼鱼上次落到 7=捕猎者);
+    //   普通升级(2-4/6-9)没有分支, 关掉即继续。
     if (type === 'LevelUpMenu') {
+      const lu = s?.activeMenu?.levelUp;
+      if (lu?.isProfessionChooser && (lu.offered || []).length >= 2) {
+        const pid = pickProfession(lu);
+        if (pid != null) {
+          try {
+            const r = await jjPost(base, '/levelup_choose', { profession: pid });
+            if (r.ok) {
+              done.push('选专精' + (r.chosen ?? pid));
+              log(`${tag} 升级菜单(${lu.skillName} Lv${lu.level}) → 选专精 ${r.chosen ?? pid}=${r.name || '?'} (偏好表命中)`);
+            } else {
+              log(`${tag} /levelup_choose 失败: ${r.error} → 退回强关`);
+              await jj(base, '/menu_close', { method: 'POST' });
+              done.push('强关升级菜单');
+            }
+          } catch (e) { log(`${tag} /levelup_choose 异常: ${e.message}`); break; }
+          await new Promise(r => setTimeout(r, 900));
+          continue;
+        }
+      }
       try {
         const r = await jj(base, '/menu_close', { method: 'POST' });
         done.push('关升级菜单');
-        log(`${tag} 升级菜单挡 ready → 强关 ${JSON.stringify(r).slice(0, 90)} (专精可能被默认选中)`);
+        log(`${tag} 普通升级菜单 → 关 ${JSON.stringify(r).slice(0, 90)}`);
       } catch (e) { log(`${tag} 升级菜单强关失败: ${e.message}`); break; }
       await new Promise(r => setTimeout(r, 800));
       continue;

@@ -39,7 +39,7 @@ const SELL_CHEAP = ['Sardine', 'Herring', 'Red Mullet', 'Seaweed', 'Albacore', '
 // ⭐2026-11-06 实测新增两道保险(冬25 挂机时抓到的):
 //  A. 鱼饵耗尽 → fishbot 报 enabled=true 但完全不动(host 卡了 24 分钟、体力满/0 抛竿)。鱼竿饵用完必须补。
 //  B. 假活哨兵: 同一个号连续 6 次巡检(2 分钟) fishCaught 没涨, 且不在起竿界面 → 硬重启 fishbot + 重选竿。
-const lastFish = new Map(), stallCnt = new Map();
+const lastFish = new Map(), stallCnt = new Map(), relocateCnt = new Map();
 async function baitGuard(label, A) {
   const r = await A.post('/rod', { action: 'show' }).catch(() => null);
   const ri = r?.rodInfo;
@@ -139,7 +139,7 @@ async function keep(label, A, { allowSell }) {
     const r = await A.post('/fishbot', { action: 'on' }).catch(() => null);
     log(label, 'fishbot 重开 →', JSON.stringify(r).slice(0, 60), '体力', Math.round(p.stamina));
   }
-  // 假活哨兵: 2 分钟没鱼 + 不在起竿 → 硬重启一轮
+  // 假活哨兵: 2 分钟没鱼 + 不在起竿 → 硬重启一轮；连续两轮还不行 → 用 /fish_areas 换个钓点
   const now = (await A.state().catch(() => null))?.player?.fishCaught ?? null;
   if (now != null) {
     const prev = lastFish.get(label);
@@ -148,6 +148,14 @@ async function keep(label, A, { allowSell }) {
       stallCnt.set(label, c);
       if (c >= 6) {
         stallCnt.set(label, 0);
+        const tries = (relocateCnt.get(label) || 0) + 1;
+        relocateCnt.set(label, tries);
+        if (tries >= 2) {
+          // 2026-11-06 接 /fish_areas: 连着两轮硬重启都不上鱼 = 这个钓点废了(没水/被挡/无鱼)
+          relocateCnt.set(label, 0);
+          const moved = await relocate(label, A).catch(() => false);
+          if (moved) return;
+        }
         log(label, '⚠️ 疑似假活(2 分钟 0 鱼) → fishbot 硬重启');
         await A.post('/fishbot', { action: 'off' }).catch(() => null);
         await sleep(800);
@@ -158,8 +166,39 @@ async function keep(label, A, { allowSell }) {
         await A.post('/face', { direction: 1 }).catch(() => null);
         await A.post('/fishbot', { action: 'on' }).catch(() => null);
       }
-    } else { lastFish.set(label, now); stallCnt.set(label, 0); }
+    } else { lastFish.set(label, now); stallCnt.set(label, 0); relocateCnt.set(label, 0); }
   }
+}
+
+// 2026-11-06 接 /fish_areas: 算出当前地图所有可钓位(waterX,waterY,standX,standY), 挑离自己最近的
+// 站过去、面朝水、重开 fishbot。返回 true=确实换了点。
+async function relocate(label, A) {
+  const s = await A.state().catch(() => null);
+  if (!s?.player) return false;
+  const r = await A.get('/fish_areas').catch(() => null);
+  const spots = (r?.spots || []).filter(t => t.standX != null && t.standY != null);
+  if (!spots.length) { log(label, '换点: /fish_areas 没给出可钓位'); return false; }
+  const p = s.player;
+  spots.sort((a, b) => (Math.abs(a.standX - p.x) + Math.abs(a.standY - p.y)) - (Math.abs(b.standX - p.x) + Math.abs(b.standY - p.y)));
+  const t = spots[0];
+  if (Math.abs(t.standX - p.x) + Math.abs(t.standY - p.y) <= 1) return false; // 已经站在最近点
+  await A.post('/fishbot', { action: 'off' }).catch(() => null);
+  await A.post('/warp', { location: s.location?.name, x: t.standX, y: t.standY }).catch(() => null);
+  await sleep(1500);
+  const s2 = await A.state().catch(() => null);
+  if (!s2?.player) return false;
+  const p2 = s2.player;
+  if (Math.hypot(p2.x - t.standX, p2.y - t.standY) > 1.5) { log(label, '换点 warp 没落地', t.standX + ',' + t.standY); return false; }
+  const dir = Math.abs(t.waterX - t.standX) >= Math.abs(t.waterY - t.standY)
+    ? (t.waterX > t.standX ? 1 : 3) : (t.waterY > t.standY ? 2 : 0);
+  const inv = s2.inventory || [];
+  const rod = inv.find(i => /Iridium Rod/i.test(i?.name || '')) || inv.find(i => /Rod|Pole/i.test(i?.name || ''));
+  if (rod) await A.post('/select', { name: rod.name }).catch(() => null);
+  await baitGuard(label, A).catch(() => null);
+  await A.post('/face', { direction: dir }).catch(() => null);
+  await A.post('/fishbot', { action: 'on' }).catch(() => null);
+  log(label, '📍 换钓点 →', s2.location?.name, t.standX + ',' + t.standY, '朝', dir, '(水格', t.waterX + ',' + t.waterY + ')');
+  return true;
 }
 
 log('🐟 锁时双人钓鱼看护启动 (host 7842 + fish 7843; 解锁后自动退出)');
