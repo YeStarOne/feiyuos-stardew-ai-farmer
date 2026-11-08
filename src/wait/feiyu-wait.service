@@ -1,0 +1,17 @@
+[Unit]
+Description=Feiyu /wait long-poll server (Stardew cross-process mount)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/qq-workspace/wait
+ExecStart=/usr/bin/python3 %h/qq-workspace/wait/wait_server.py --base http://127.0.0.1:47844 --port 47870
+Restart=always
+RestartSec=3
+MemoryMax=64M
+StandardOutput=append:%h/qq-workspace/wait/wait_server.log
+StandardError=append:%h/qq-workspace/wait/wait_server.log
+
+[Install]
+WantedBy=default.target
