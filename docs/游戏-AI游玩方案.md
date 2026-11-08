@@ -438,7 +438,7 @@ curl -s localhost:7842/state | grep dayOfMonth   # 必须 +1
 - ⭐⭐不/sleep强杀游戏=整日回滚(56铁40煤全丢)→停机前必/sleep。
 - 烧锭链v1.1: craft-smelt动态/machines发现炉位(只报当前地图,先warp回家)+4邻格走位+face必发+/clock推进; smelt-session.mjs批量多炉。
 - 农舍熔炉阵(7,8)(6,9)(8,9)(5,9); 铁条4条出炉; 品质洒水器待金矿40+/精炼石英。
-- 交接手册: D:/stardew-ai-farmer/docs/小肥鱼上岗手册.md (已推YeStarOne/stardew-ai-farmer 5f60bbd)。
+- 交接手册: D:/stardew-ai-farmer/docs/小肥鱼上岗手册.md (已推YeStarOne/feiyuos-stardew-ai-farmer 5f60bbd)。
 
 
 ## §三十三 /harvest批量收割端点+季末清田 (2026-11-04)
