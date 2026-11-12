@@ -1,0 +1,582 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# 【快照说明】本文件是 2026-11-13 从生产正本 qq-workspace/bin/sd 摘取的快照，
+# 含当天的「折叠式截断」修复（超长 JSON 不再切半截，见下方案注释）。
+# 正本 = qq-workspace/bin/sd（她实际执行的那份）；改工具先改正本，再更新这里。
+# 以下是正本原文（含原 shebang，重复无碍——快照不直接执行）：
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""sd.py —— 星露谷桥的固定调用器（泡泡/肥鱼专用，替代内联长 curl）
+
+为什么要它：她以前每次看状态都要现写一段 curl + python3 -c（中位 360 字、一笔命令
+398 字），484 条触桥命令≈6.6 万 token 全进了上下文，压缩一次还要重建 18 万。这里把
+「调桥 + 解析 + 打印一行摘要」固定成一个脚本，她只需要：
+    sd state
+    sd warp Beach 44 35
+    sd move 50 12 && sd state
+    sd act select "Iridium Rod"
+
+输出纪律：**一行摘要**（不带 JSON 大块），要详细字段用 `sd raw <path>`。
+
+用法（全部走 Tailscale 中继，别直连 7842，会 403 Invalid Hostname）：
+    sd state                 # 一行：位置/时间/体力/钱/手持/包
+    sd state --json          # 要完整 JSON 时直出（慎用，会占上下文）
+    sd inv [--all]           # 背包：槽位 | 名字 x数量（--all 连工具一起）
+    sd near [radius]         # 周围：可走格数/障碍/NPC/怪/掉落
+    sd shot [out.png]        # 截图存文件（默认 /tmp/sd-shot.png），只回报路径+尺寸
+    sd warp <地点> <x> <y>
+    sd move <x> <y>
+    sd face <0上|1右|2下|3左>     # 可写 up/right/down/left
+    sd use                   # 用手里工具（面向的那一格）
+    sd key <键名>
+    sd interact
+    sd select <物品名>
+    sd fishbot on|off|status
+    sd heal | refill | sleep
+    sd pause | resume         # 主持端暂停/继续（只在主持让你动时用）
+    sd wait <path> <condition> [秒] [--json]
+                              # **等到条件成立才返回**。别再写 sleep 轮询循环：
+                              #   sd wait /state "invSlotsUsed >= 34" 120
+                              #   sd wait /inv/count "coal >= 10" 60
+                              # 退出码就是结果：0=成立 2=超时 3=看不见(降级) 1=条件写错
+    sd raw <endpoint> [json]  # 兜底：任意端点透传，输出压缩到一行
+
+约定：
+    - 单次超时默认 12s（surroundings 25s、shot 20s）；网络抖一次自动重试一次。
+    - 任何失败都以 `ERR <原因>` 结尾 + 退出码 1，别猜。
+    - ⚠️ /fishbot 的 GET 是 toggle，本脚本只发 POST。
+    - ⚠️ /use 之后必须再 `sd state` 或 `sd near` 确认，动作不保证成功。
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+
+# 2026-11-11: 默认改成 47843 = 泡泡自己的桥。
+#   47844 是主持(蓝色小肥鱼) —— 以前默认连主持, sd warp 会把主持搬走而她以为在搬自己。
+#   要看主持状态显式写 SD_BRIDGE=http://127.0.0.1:47844 sd state
+BRIDGE = os.environ.get("SD_BRIDGE", "http://127.0.0.1:47843")
+WAIT_URL = os.environ.get("SD_WAIT", "http://127.0.0.1:47870/wait")
+# 不依赖 PATH：非交互 bash 不读 .bashrc，她以前都写全路径
+SELF = os.path.expanduser("~/qq-workspace/bin/sd")
+TIMEOUT = 12.0
+ACTIONS = {
+    "warp", "move", "face", "use", "key", "interact", "select", "fishbot",
+    "heal", "refill", "sleep", "pause", "resume", "wakeup", "menu_close",
+    "select_tool", "sell", "buy", "plant", "harvest", "drop", "equip",
+}
+
+
+def _curl(url, data=None, timeout=TIMEOUT):
+    # subprocess 调 curl：服务器上 python 的 urllib 直连桥会 ConnectionReset
+    # 2026-11-11: 她自己的桥(47843)按 Host 白名单放行，缺头一律 400 Bad Request
+    cmd = ["curl", "-s", "-m", str(int(timeout)), "-H", "Host: localhost"]
+    if data is not None:
+        cmd += ["-X", "POST", "-H", "Content-Type: application/json", "-d", json.dumps(data)]
+    cmd += [url]
+    for _ in range(2):
+        p = subprocess.run(cmd, capture_output=True)
+        out = p.stdout.decode("utf-8", "replace").strip()
+        if out and p.returncode == 0:
+            return out
+    return ""
+
+
+def _get(endpoint, timeout=TIMEOUT):
+    raw = _curl(BRIDGE + endpoint, timeout=timeout)
+    if not raw:
+        die("桥没回话（%s）—— 看 PC 是否开机/游戏是否在跑" % endpoint)
+    try:
+        return json.loads(raw)
+    except ValueError:
+        die("桥返回的不是 JSON（%s）：%s" % (endpoint, raw[:120]))
+
+
+def _post(endpoint, body, timeout=TIMEOUT):
+    raw = _curl(BRIDGE + "/" + endpoint, data=body or {}, timeout=timeout)
+    if not raw:
+        die("桥没回话（%s）" % endpoint)
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {"ok": True, "raw": raw[:200]}
+
+
+USAGE = """sd <命令> —— 星露谷桥一行式调用
+  看:  state | inv [--all] | near [半径] | shot [路径]
+  动:  warp 地点 x y | move x y | face 0-3/up-right-down-left | use | key 键 | interact
+       select 物品 | fishbot on|off | heal | refill | sleep | pause | resume
+  等:  wait <path> <condition> [秒] [--json]   条件成立才返回（别再写 sleep 轮询）
+  农活: farm scan|clean|water|reap|dig|day [x1 y1 x2 y2]   一整套，自带 refill 与复核
+  兜底: raw <endpoint> [json]     详细用法看 sd.py 文件头"""
+
+
+def die(msg):
+    print("ERR " + msg)
+    sys.exit(1)
+
+
+def _clock(t):
+    tod = int(t.get("timeOfDay", 0))
+    return "%02d:%02d" % (tod // 100, tod % 100)
+
+
+def _where(d):
+    loc = (d.get("location") or {}).get("name", "?")
+    p = d.get("player") or {}
+    return "%s(%s,%s)" % (loc, p.get("x"), p.get("y"))
+
+
+def _vitals(d):
+    p = d.get("player") or {}
+    return "体力%d/%d HP%d" % (int(p.get("stamina", 0)), int(p.get("maxStamina", 0)), int(p.get("health", 0)))
+
+
+def cmd_state(args):
+    # sd 自己也在 PATH 里；把首行打出来，方便她记住完整路径
+    d = _get("/state")
+    if "--json" in args:
+        print(json.dumps(d, ensure_ascii=False))
+        return
+    if not d.get("worldReady"):
+        print("worldReady=false —— 还在标题/读档，等 15s 再试")
+        return
+    p = d.get("player") or {}
+    t = d.get("time") or {}
+    bag = d.get("inventory") or []
+    used = len(bag)
+    cap = int(p.get("maxItems") or 0)
+    menu = d.get("activeMenu")
+    menustr = ""
+    if menu:
+        menustr = " 菜单:%s" % (menu.get("type") if isinstance(menu, dict) else menu)
+    # 季节本地化（2026-11-07 修）：原来硬编码"冬"，spring 15 会显示成"冬15 spring"，误导计划
+    _SEASON_CN = {"spring": "春", "summer": "夏", "fall": "秋", "winter": "冬"}
+    season_cn = _SEASON_CN.get(str(t.get("season") or "").lower(), str(t.get("season") or "?"))
+    print("%s %s%s %s | %s | 钱%d | 手:%s | 包%d/%d%s" % (
+        _where(d),
+        season_cn, t.get("dayOfMonth"), _clock(t),
+        _vitals(d),
+        int(p.get("money", 0)),
+        p.get("currentItem") or "空手",
+        used, cap,
+        menustr,
+    ))
+
+
+def cmd_inv(args):
+    d = _get("/state")
+    bag = d.get("inventory") or []
+    show_all = "--all" in args
+    parts = []
+    for it in bag:
+        if not show_all and it.get("catNum") == -99:  # 工具类
+            continue
+        name = it.get("displayName") or it.get("name")
+        n = it.get("stack", 1)
+        parts.append("%s:%s%s" % (it.get("slotIndex"), name, ("x%d" % n) if n and n > 1 else ""))
+    if not parts:
+        print("包是空的")
+        return
+    print("包%d格 | %s" % (len(bag), " ".join(parts)))
+
+
+def cmd_near(args):
+    radius = args[0] if args and args[0].isdigit() else "6"
+    d = _get("/surroundings?radius=" + radius, timeout=25)
+    tiles = d.get("tiles") or []
+    walk = sum(1 for t in tiles if t.get("passable"))
+    npcs = [n.get("name") for n in (d.get("npcs") or [])]
+    mons = [m.get("name") for m in (d.get("monsters") or [])]
+    farms = [f.get("name") for f in (d.get("farmers") or [])]
+    anim = [a.get("name") for a in (d.get("animals") or [])]
+    drops = [t for t in tiles if t.get("object")]
+    bits = ["r%s 可走%d/%d" % (radius, walk, len(tiles))]
+    if npcs:
+        bits.append("NPC " + ",".join(npcs))
+    if mons:
+        bits.append("怪 " + ",".join(mons))
+    if farms:
+        bits.append("玩家 " + ",".join(farms))
+    if anim:
+        bits.append("动物 " + ",".join(anim))
+    if drops:
+        bits.append("地面物件%d" % len(drops))
+    print(" | ".join(bits))
+
+
+def cmd_shot(args):
+    out = args[0] if args else "/tmp/sd-shot.png"
+    raw = _curl(BRIDGE + "/screenshot", data="", timeout=20)
+    if not raw:
+        die("截图接口没回话")
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        die("截图返回不是 JSON")
+    b64 = d.get("image") or ""
+    if not b64:
+        die("截图没有 image 字段：%s" % str(d)[:120])
+    import base64
+    with open(out, "wb") as f:
+        f.write(base64.b64decode(b64))
+    print("截图 -> %s (%d KB)" % (out, len(b64) * 3 // 4 // 1024))
+
+
+def cmd_action(name, args):
+    if name == "warp":
+        if len(args) < 3:
+            die("用法: sd warp <地点> <x> <y>")
+        body = {"location": args[0], "x": int(args[1]), "y": int(args[2])}
+    elif name == "move":
+        if len(args) < 2:
+            die("用法: sd move <x> <y>")
+        body = {"x": int(args[0]), "y": int(args[1])}
+    elif name == "face":
+        if not args:
+            die("用法: sd face <0上|1右|2下|3左|up|right|down|left>")
+        m = {"up": 0, "right": 1, "down": 2, "left": 3}
+        body = {"direction": m.get(args[0].lower(), None) if not args[0].isdigit() else int(args[0])}
+        if body["direction"] is None:
+            die("方向只认 0/1/2/3 或 up/right/down/left")
+    elif name == "key":
+        if not args:
+            die("用法: sd key <键名>，如 Y / esc / E")
+        body = {"key": args[0]}
+    elif name == "select":
+        if not args:
+            die("用法: sd select <物品名>")
+        body = {"name": " ".join(args)}
+    elif name == "fishbot":
+        mode = args[0] if args else "status"
+        if mode == "status":
+            d = _get("/state")
+            print("fishbot 开关在 state 里看不到，判在不在钓只看鱼获增量（sd state 看包/体力变化）")
+            return
+        body = {"on": mode == "on"}
+    else:
+        body = {}
+    d = _post(name, body)
+    ok = d.get("ok", True)
+    msg = d.get("message") or d.get("error") or ""
+    print("%s %s%s" % (name, "ok" if ok else "FAIL", (" " + str(msg)) if msg else ""))
+    if not ok:
+        sys.exit(1)
+
+
+def _norm_path(a):
+    """把用户给的端点名归一成 /x/y。
+
+    Git Bash（MSYS）会把**以 / 开头的参数**当 Windows 路径改写：
+        /state      -> D:/Program Files/Git/state
+        /inv/count  -> D:/Program Files/Git/inv/count
+    2026-11-08 实测踩到：`sd wait /state ...` 发出去的是 "D:/Program Files/Git/state"，
+    服务端回 path_not_waitable。这不是服务端的错，也不是引号的问题，是 shell 改写了参数。
+    所以这里既接受 'state' / '/state'，也能从被改写的串里把尾巴捞回来。
+    """
+    s = str(a or '').replace(chr(92), '/')   # 反斜杠先统一成斜杠，下面只处理斜杠
+    if '/Git/' in s:                      # MSYS 根目录下的改写
+        s = s.split('/Git/', 1)[1]
+    elif len(s) > 1 and s[1] == ':' and '/' in s:
+        s = s.split(':', 1)[1].lstrip('/')
+    if not s.startswith('/'):
+        s = '/' + s
+    return s
+
+
+def cmd_wait(args):
+    """等一个条件成立。退出码就是结果：0 matched / 2 timeout / 3 degraded / 1 其它。
+
+    这是替代 `for i in $(seq 1 40); do sleep 15; curl /state; done` 的那一行。
+    阻塞一次，服务端 1s 采样一次 /state，命中立刻返回。
+    """
+    if len(args) < 2:
+        die("用法: sd wait <path> <condition> [秒] [--json]")
+    path, cond = _norm_path(args[0]), args[1]
+    rest = [a for a in args[2:] if a != "--json"]
+    as_json = "--json" in args[2:]
+    tmo = int(rest[0]) if rest and rest[0].isdigit() else 60
+    if tmo > 300:
+        tmo = 300
+    body = {"path": path, "condition": cond, "timeout_s": tmo}
+    raw = _curl(WAIT_URL, data=body, timeout=tmo + 15)
+    if not raw:
+        die("wait 服务没回话（%s）—— 看 feiyu-wait 是否在跑" % WAIT_URL)
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        die("wait 返回的不是 JSON: %s" % raw[:120])
+    if as_json:
+        print(json.dumps(d, ensure_ascii=False))
+    else:
+        r = d.get("reason")
+        if r == "matched":
+            print("MATCHED  %s  (样本%d, %dms)" % (cond, d.get("samples_ok", 0), d.get("elapsed_ms", 0)))
+        elif r == "timeout":
+            print("TIMEOUT  %s  %ss 内没成立 (样本%d)"
+                  % (cond, d.get("effective_timeout_s"), d.get("samples_ok", 0)))
+        elif r == "degraded":
+            print("DEGRADED 看不见状态，不是条件不成立：失败 %d/%d 样本"
+                  % (d.get("samples_failed", 0), d.get("samples_total", 0)))
+        else:
+            print("ERR %s: %s" % (r, d.get("detail") or ""))
+        if d.get("samples_missing"):
+            if path.startswith("/inv/count"):
+                tip = "物品名用下划线小写（如 parsnip_seeds、quality_sprinkler）"
+            else:
+                tip = "字段名可能写错，真名用 `sd state --json` 看（钱在 player.money，不是 money）"
+            print("  提示: missing=%d —— %s" % (d["samples_missing"], tip))
+    sys.exit({"matched": 0, "timeout": 2, "degraded": 3}.get(d.get("reason"), 1))
+
+
+def cmd_raw(args):
+    if not args:
+        die("用法: sd raw <endpoint> [json]")
+    ep = args[0] if args[0].startswith("/") else "/" + args[0]
+    if len(args) > 1:
+        d = _post(ep.lstrip("/"), json.loads(args[1]), timeout=25)
+    else:
+        d = _get(ep, timeout=25)
+    out = json.dumps(d, ensure_ascii=False)
+    # 绝不截半截 JSON（11-13）：以前这里写 [:1500]，超长时切在字符串中间，
+    # 吐出来的是**非法 JSON**。她后面接 `| python3 -c "json.load(sys.stdin)"`
+    # 必炸——实测 31 次 /state 调用里 6 次报 Traceback（19.4%），而端点本身
+    # 一次没坏（直连 47843 返回 13036 字节合法 JSON）。这是工具层造假失败。
+    #
+    # 修法：超长时折叠**大字段**而不是切字符。折叠顺序=列表先折、同类别内大的
+    # 先折；实测 /state 里 inventory 一个字段就占 9044/12387 字（73%），只折它
+    # 和 recent_events 就够，player/time/location 永远活下来（那是她最常读的）。
+    #
+    # 预算 2500 而不是 1500：player 单字段就 1288 字，1500 装不下
+    # player+time+location，会把 player 折成字符串 → `d["player"]["money"]`
+    # 立刻 KeyError，等于把工具修坏。2500 字≈700 token，比 12387 字省 80%。
+    # 永不折叠的字段：她真的会读这些。player 单字段 1288 字，按纯体积排序
+    # 会先折它（列表折完还不够时），结果 `d["player"]["money"]` 直接 KeyError。
+    # 体积排序只能用来决定「先折谁」，不能决定「能不能折谁」。
+    CORE = {"ok", "worldReady", "player", "time", "location", "activeMenu",
+            "activeEvent", "in_dialogue"}
+    BUDGET = 3000
+    if len(out) > BUDGET:
+        if isinstance(d, dict):
+            keep = dict(d)
+            def _fold_rank(item):
+                n, k = item
+                return (0 if isinstance(d[k], (list, tuple)) else 1, -n)
+            sized = sorted(((len(json.dumps(v, ensure_ascii=False)), k)
+                            for k, v in d.items()), key=_fold_rank)
+            folded = []
+            for n, k in sized:
+                if len(json.dumps(keep, ensure_ascii=False)) <= BUDGET:
+                    break
+                if k in CORE:
+                    continue          # 核心字段：宁可超预算也不折
+                v = d[k]
+                if isinstance(v, (list, tuple)):
+                    keep[k] = {"_count": len(v), "_folded": True,
+                               "_sample": str(list(v[:1]))[:160]}
+                else:
+                    keep[k] = {"_chars": n, "_folded": True}
+                folded.append(k)
+            keep["_folded"] = folded
+            out = json.dumps(keep, ensure_ascii=False)
+        else:
+            out = json.dumps({"_truncated": True, "_total_chars": len(out)},
+                             ensure_ascii=False)
+    print(out)
+
+
+def cmd_farm(args):
+    """sd farm <子命令> —— 一天的农活一口气跑完
+
+    子命令:
+      scan [x1 y1 x2 y2]   扫一次田，打印 该浇/该收/该清 三个数（默认 50 14 68 28）
+      water [x1 y1 x2 y2]  先 refill 再整片浇，最后重扫复核
+      reap  [x1 y1 x2 y2]  先站到田中心再 /harvest，打印实际收了几株
+      day                  打死一整套：scan -> refill -> water -> reap -> 复核
+      clean                列出枯萎作物坐标（只读，不改）
+      dig x1 y1 x2 y2      把矩形内所有"能耕且空着"的格子翻成 HoeDirt
+
+    为什么要有它：/tool_area 会独占游戏主线程最长 10 分钟，/queue 又会抢走它的
+    等待句柄（实测并发时 tool_area 返回 0 字节）。所以这一层必须自己管顺序、
+    自己复核，不能让她手搓 curl 并发。
+    """
+    P = os.environ.get("SD_FARM_RECT", "50 14 68 28").split()
+    sub = args[0] if args else "day"
+    rest = args[1:]
+
+    def rect():
+        if len(rest) >= 4:
+            return [int(v) for v in rest[:4]]
+        return [int(v) for v in P]
+
+    def scan_tiles(x1, y1, x2, y2):
+        # 必须先确认人在 Farm：室内时 /surroundings 会把矩形静默夹成 11x11
+        st = _get("/state")
+        loc = (st.get("location") or {}).get("name")
+        if loc != "Farm":
+            die("人不在 Farm（在 %s）—— 先 `sd warp Farm 64 17`，否则扫出来是空的" % loc)
+        d = _get("/surroundings?x1=%d&y1=%d&x2=%d&y2=%d" % (x1, y1, x2, y2), timeout=25)
+        sc = d.get("scanned") or {}
+        # 被夹范围的检测：请求的矩形必须原样回来
+        if (sc.get("x1"), sc.get("y1"), sc.get("x2"), sc.get("y2")) != (x1, y1, x2, y2):
+            die("矩形被桥夹了：请求(%d,%d)-(%d,%d) 实得%s —— 人可能在室内"
+                % (x1, y1, x2, y2, json.dumps(sc)))
+        return d.get("tiles") or []
+
+    def tally(tiles):
+        crops = [t for t in tiles if t.get("crop")]
+        ripe = [t for t in crops if t.get("harvestable")]
+        dry = [t for t in crops if not t.get("watered") and not t.get("harvestable")]
+        open_ = [t for t in tiles
+                 if t.get("diggable") and not t.get("terrain") and not t.get("object")]
+        return crops, ripe, dry, open_
+
+    if sub == "scan" or sub == "clean":
+        x1, y1, x2, y2 = rect()
+        crops, ripe, dry, open_ = tally(scan_tiles(x1, y1, x2, y2))
+        if sub == "clean":
+            # 桥没有"枯萎"概念，只能靠外部特征猜：有 crop、不在成熟、且 cropPhase 停在
+            # 某值很多天。这里只列"有作物但永远不熟"的候选，绝不替她判定死活。
+            print("候选（有作物但未熟）%d 株 —— 我判断不了死活，你看画面" % len(crops))
+            for t in crops:
+                print("  (%d,%d) %s phase=%s watered=%s"
+                      % (t["x"], t["y"], t.get("cropName"), t.get("cropPhase"), t.get("watered")))
+            return
+        print("田 (%d,%d)-(%d,%d) | 作物 %d | 熟 %d | 该浇 %d | 可开垦 %d"
+              % (x1, y1, x2, y2, len(crops), len(ripe), len(dry), len(open_)))
+        return
+
+    if sub == "water":
+        x1, y1, x2, y2 = rect()
+        # 1) 先 refill：壶空时 /tool_area 只跑 1 格就停，而 ok 还是 true
+        r = _post("refill", {})
+        if not r.get("ok", True) and "No watering can" in str(r.get("error", "")):
+            die("包里没有水壶")
+        print("水壶 %s/%s" % (r.get("water"), r.get("max")))
+        # 2) 整片浇。这一步独占主线程，期间不许发任何别的请求
+        body = {"operation": "water", "x1": x1, "y1": y1, "x2": x2, "y2": y2}
+        d = _post("tool_area", body, timeout=600)
+        if d.get("out_of_water"):
+            print("⚠️ 中途壶空了（out_of_water）—— 再跑一次 `sd farm water`")
+        print("浇：swings=%s still_missing=%s executed=%s"
+              % (d.get("swings"), len(d.get("still_missing") or []),
+                 (d.get("result") or {}).get("executed")))
+        # 3) 复核：不重扫一次不算数
+        crops, ripe, dry, open_ = tally(scan_tiles(x1, y1, x2, y2))
+        print("复核：作物 %d | 还干着 %d" % (len(crops), len(dry)))
+        if dry:
+            print("  还干的坐标：" + " ".join("(%d,%d)" % (t["x"], t["y"]) for t in dry[:20]))
+        return
+
+    if sub == "reap":
+        x1, y1, x2, y2 = rect()
+        crops, ripe, dry, open_ = tally(scan_tiles(x1, y1, x2, y2))
+        if not ripe:
+            print("没有成熟的（作物 %d 株，熟 0）—— 不白跑" % len(crops))
+            return
+        # /harvest 不走路，按玩家脚下算半径。先站到成熟作物群的几何中心
+        cx = int(sum(t["x"] for t in ripe) / len(ripe))
+        cy = int(sum(t["y"] for t in ripe) / len(ripe))
+        w = _post("warp", {"location": "Farm", "x": cx, "y": cy})
+        if not w.get("ok", True):
+            # 中心格站不住时用桥建议的落脚点
+            near = (w.get("standable_near") or [])
+            if not near:
+                die("站不到 (%d,%d) 也没有可站的邻居" % (cx, cy))
+            w = _post("warp", {"location": "Farm",
+                               "x": near[0]["x"], "y": near[0]["y"]})
+        for _ in range(20):
+            st = _get("/state")
+            if (st.get("location") or {}).get("name") == "Farm":
+                break
+            time.sleep(0.3)
+        span = max(max(t["x"] for t in ripe) - min(t["x"] for t in ripe),
+                   max(t["y"] for t in ripe) - min(t["y"] for t in ripe)) // 2 + 2
+        h = _post("harvest?radius=%d" % min(span, 50), {})
+        print("收：harvested=%s（半径 %d）" % (h.get("harvested"), min(span, 50)))
+        crops2, ripe2, _, _ = tally(scan_tiles(x1, y1, x2, y2))
+        print("复核：还剩熟 %d 株，作物总数 %d" % (len(ripe2), len(crops2)))
+        return
+
+    if sub == "dig":
+        x1, y1, x2, y2 = rect()
+        tiles = scan_tiles(x1, y1, x2, y2)
+        _, _, _, open_ = tally(tiles)
+        if not open_:
+            print("矩形内没有可开垦的空地")
+            return
+        # /till_area 只认 tiles[]，传 x1..y2 会被静默忽略并退化成"面朝格"
+        before_tilled = {(t["x"], t["y"]) for t in open_ if t.get("terrain") == "HoeDirt"}
+        body = {"tiles": [{"x": t["x"], "y": t["y"]} for t in open_]}
+        d = _post("till_area", body, timeout=120)
+        print("翻地：桥报 tilled=%s skipped=%s（这是它处理了几格，不是新增几格）"
+              % (d.get("tilled_count"), d.get("skipped_count")))
+        for s in (d.get("skipped") or [])[:8]:
+            print("  跳过 (%s,%s) %s" % (s.get("x"), s.get("y"), s.get("reason")))
+        # 复核：翻前翻后各数一遍"该翻的格里有多少已经是 HoeDirt"，差值才叫真新增
+        want = {(t["x"], t["y"]) for t in open_}
+        now = {(t["x"], t["y"]) for t in scan_tiles(x1, y1, x2, y2)
+               if t.get("terrain") == "HoeDirt"}
+        print("复核：这 %d 格里现在有 %d 格是 HoeDirt（本次新翻 %d）"
+              % (len(want), len(want & now), len(want - before_tilled)))
+        miss = want - now
+        if miss:
+            print("  还是没翻的：" + " ".join("(%d,%d)" % p for p in sorted(miss)))
+        return
+
+    if sub == "day":
+        x1, y1, x2, y2 = rect()
+        crops, ripe, dry, open_ = tally(scan_tiles(x1, y1, x2, y2))
+        st = _get("/state")
+        tod = int((st.get("time") or {}).get("timeOfDay") or 0)
+        print("== 夏%d %02d:%02d | 作物 %d 熟 %d 该浇 %d 可开垦 %d"
+              % ((st.get("time") or {}).get("dayOfMonth") or 0, tod // 100, tod % 100,
+                 len(crops), len(ripe), len(dry), len(open_)))
+        if ripe:
+            print("-- 1/3 收")
+            cmd_farm(["reap"] + [str(v) for v in (x1, y1, x2, y2)])
+        if dry:
+            print("-- 2/3 浇")
+            cmd_farm(["water"] + [str(v) for v in (x1, y1, x2, y2)])
+        else:
+            print("-- 2/3 浇：今天不用浇（没干的）")
+        print("-- 3/3 完；扩田要手动 `sd farm dig x1 y1 x2 y2`（怕把你计划外的地也翻了）")
+        return
+
+    die("sd farm 只认: scan|clean|water|reap|dig|day")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__.strip().split("\n\n")[-2])
+        return
+    cmd, args = sys.argv[1], sys.argv[2:]
+    try:
+        if cmd == "state":
+            cmd_state(args)
+        elif cmd == "inv":
+            cmd_inv(args)
+        elif cmd == "near":
+            cmd_near(args)
+        elif cmd == "shot":
+            cmd_shot(args)
+        elif cmd in ACTIONS:
+            cmd_action(cmd, args)
+        elif cmd == "wait":
+            cmd_wait(args)
+        elif cmd == "raw":
+            cmd_raw(args)
+        elif cmd == "farm":
+            cmd_farm(args)
+        else:
+            die("不认识: %s（sd help 看用法）" % cmd)
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass
+    except Exception as e:  # noqa: BLE001 - 失败必须以一行报出去
+        die("%s: %s" % (type(e).__name__, str(e)[:120]))
+
+
+if __name__ == "__main__":
+    main()
