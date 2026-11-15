@@ -1,0 +1,9 @@
+{
+  "Name": "CheatBridge",
+  "Author": "yestar",
+  "Version": "1.1.0",
+  "Description": "Localhost-only cheat endpoints (money/stamina/qi/health/item spawn) for the AI farm, every write returns before/after audit",
+  "UniqueID": "yestar.cheatbridge",
+  "EntryDll": "CheatBridge.dll",
+  "MinimumApiVersion": "4.0.0"
+}

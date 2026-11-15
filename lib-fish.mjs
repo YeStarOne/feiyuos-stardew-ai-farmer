@@ -181,20 +181,35 @@ export function physicalRightClick(ax, ay) {
 
 // ================= 卖出白名单政策 (2026-10-28 用户拍板) =================
 // 原则: 只有白名单内的东西才卖; 白名单外一律 存木箱(没有箱子就留背包), 宁可停钓不可误卖
-const SELL_FISH = /\b(Bass|Trout|Catfish|Chub|Perch|Carp|Sunfish|Shad|Walleye|Bream|Pike|Eel|Sardine|Anchovy|Flounder|Halibut|Octopus|Squid|Snapper|Tuna|Albacore|Herring|Tilapia|Red Mullet|Sea Jelly|Mackerel|Sturgeon|Lingcod|Void Salmon|Super Cucumber|Midnight Carp|Woodskip|Tiger Trout|Cucumber|Stonefish|Ghostfish|Dorado|Blobfish|Slimejack|Pufferfish|Stingray|Lionfish|Salmon|Ice Pip|Lava Eel|Sandfish)\b/;
+// ⭐2026-11-14 与 lib.mjs 同步: 补 Bullhead(山湖主力)/River+Cave Jelly —— 之前湖鱼卖不掉堆包 387 条
+const SELL_FISH = /\b(Bass|Bullhead|Trout|Catfish|Chub|Perch|Carp|Sunfish|Shad|Walleye|Bream|Pike|Eel|Sardine|Anchovy|Flounder|Halibut|Octopus|Squid|Snapper|Tuna|Albacore|Herring|Tilapia|Red Mullet|Sea Jelly|River Jelly|Cave Jelly|Mackerel|Sturgeon|Lingcod|Void Salmon|Super Cucumber|Midnight Carp|Woodskip|Tiger Trout|Cucumber|Stonefish|Ghostfish|Dorado|Blobfish|Slimejack|Pufferfish|Stingray|Lionfish|Salmon|Ice Pip|Lava Eel|Sandfish)\b/;
 const SELL_CROPS = /^(Parsnip|Strawberry|Cauliflower|Potato|Melon|Tomato|Blueberry|Hot Pepper|Pepper|Wheat|Corn|Eggplant|Pumpkin|Yam|Grape|Amaranth|Kale|Radish|Green Bean|Starfruit|Rhubarb|Hops|Tea Leaves|Unmilled Rice|Fiddlehead Fern|Cranberries|Sweet Gem Berry|Ancient Fruit)$/;
-const SELL_TRASH = /^(Trash|Driftwood|Soggy Newspaper|Broken CD|Broken Glasses|Joja Cola)$/;
+// ⭐2026-11-14 与 lib.mjs 同步: 补海草/藻类 —— 她包里绿藻堆 379 个(曾被口粮保护挡住), 主人政策=垃圾可卖
+const SELL_TRASH = /^(Trash|Driftwood|Soggy Newspaper|Broken CD|Broken Glasses|Joja Cola|Seaweed|Green Algae|White Algae)$/;
+// ⭐2026-11-14 科技日拍板: 酒桶线产物 Wine 出售(150g/瓶基线, 蓝莓酒首瓶已酿成) —— 酒是可食用(edible>0)
+//   会被口粮保护拦 /store(泡泡 #2423 "两种写法都不吃"), 但它是卖钱的最终产物不是口粮, 走卖货通道不存箱。
+//   只放行 *Wine 后缀; COOKED_NOT_SELL 仍在前置闸, 熟菜照旧不卖。
+const SELL_ARTISAN = /(^| )Wine$/;
 // ⭐2026-11-05 政策漏洞(与 lib.mjs 同步): SELL_FISH 的 \bEel\b 会把 Spicy Eel(香辣鳗鱼, 熟菜)当鱼卖掉 → 熟菜一律不卖
 const COOKED_NOT_SELL = /^(Spicy Eel|Maki Roll|Sashimi|Sushi|Carp Surprise|Baked Fish|Fish Stew|Fish Taco|Trout Soup|Lobster Bisque|Chowder|Escargot|Fried Eel|Seafoam Pudding)$/i;
-export const isSellable = n => !COOKED_NOT_SELL.test(n) && (SELL_FISH.test(n) || SELL_CROPS.test(n) || SELL_TRASH.test(n));
+// ⭐2026-11-14 化石/文物护闸(泡泡手滑把 Amphibian Fossil×3 投了出货箱): 博物馆/收集包件绝不卖不投箱,
+//   硬否决挂在 isSellable 本体(所有卖/投箱路径共用这一个入口), 误配白名单也拦得住; 应存箱走 shouldStore=true。
+export const isMuseumPiece = n => /Fossil|Artifact|Dwarf Scroll|Ancient Seed|Dwarf Gadget|Rare Disc|Elvish Jewelry/i.test(n);
+export const isSellable = n => !COOKED_NOT_SELL.test(n) && !isMuseumPiece(n) && (SELL_FISH.test(n) || SELL_CROPS.test(n) || SELL_TRASH.test(n) || SELL_ARTISAN.test(n));
 
 // 任务保留位(用户拍板"有邮件优先做任务"): 这些物品即使可卖也要留 N 件在背包
 // quest 101 = 乔迪要 1 花椰菜(10-29)
 export const QUEST_RESERVE = { Cauliflower: 1 };
 
 // 常驻背包类: 既不卖也不存(工具/鱼竿/鱼饵/鱼钩/种子/待放置的箱子)
+// ⚠️ 2026-11-12 修: 工具的游戏名带材质前缀(Copper Pickaxe / Steel Axe / Gold Hoe …),
+//   原来只认裸词 Pickaxe → Copper Pickaxe 被判 shouldStore → 逼她存箱 → 箱子满 →
+//   「存箱失败, 停手」20 秒一循环死转（fish-day-loop 实测）。所以补尾部匹配 (Pickaxe|Axe|Hoe|Watering Can)$。
+//   武器同理(Name 带 Sword/Blade/Falchion/Rod…)不卖也不能丢(游戏拦), 必须视为常驻不存。
 export const isCarry = n =>
   /^(Axe|Hoe|Watering Can|Pickaxe|Scythe|Bamboo Pole|Fiberglass Rod|Iridium Rod|Training Rod|Chest|.*Bobber|.*Bait|.*Tackle)$/i.test(n)
+  || /(Pickaxe|Axe|Hoe|Watering Can)$/i.test(n)
+  || /(Sword|Blade|Falchion|Claymore|Sabre|Dagger|Club|Hammer|Rod|Pole)$/i.test(n)
   || /Seeds$|Starter$|Shoot$/i.test(n);
 
 // 应存箱: 不卖、也不必常驻背包的(采集物/素材/矿石/食物/多余装备)
@@ -378,21 +393,74 @@ export async function sweepDebris(maxVisits = 40) {
 
 // ================= 木箱 =================
 // 找附近木箱(/store 只认木箱, 杂货箱不行)
-export async function findChest(radius = 18) {
+// ⚠️2026-11-12 修: 原来返回"扫到的第一个箱子", 而第一个箱子装满 36/36 后
+//   /store 恒 ok 但 stored:[] → storeToChest 判失败 → fish-day-loop「存箱失败, 停手」
+//   20 秒一轮空转(实测 10:34~10:44 十几次, 背包 36/36 卡一整天)。
+//   农场 7 个箱子里 3 个满 4 个有空, 必须挑"还有空格"的那个。
+//   判空位用 /chest 的 capacity/used(桥端点, 纯读), 不用猜。
+// ⭐2026-11-14 秋13 泡泡实测箱况(板#2450, 复核 used 27→35 对上): (63,20) 36/36 满仓垃圾(Sap/Clay/GreenAlgae/装饰/ErrorItem)
+//   →stored:[] 静默 noop; (63,21) 箱子早没了(No chest, 老记忆坐标作废); 实测可靠优先箱=(54,11)(54,10)(52,9)。
+//   findChest 先试优先箱(不受扫描半径限制), 坏点永远跳过; 优先箱读不到(比如人在别的地图)自然落回半径扫描。
+export const CHESTS_PREFER = [[54, 11], [54, 10], [52, 9]];
+export const CHESTS_AVOID = [[63, 20], [63, 21]];
+
+export async function findChest(radius = 18, opts = {}) {
+  const wantFree = opts.needFree !== false; // 默认只挑有空位的
   const sr = await surr(radius);
-  const c = sr.tiles.find(t => /Chest/i.test(t.object || ''));
-  return c ? { x: c.x, y: c.y, name: c.object } : null;
+  const scanned = sr.tiles.filter(t => /Chest/i.test(t.object || '')).map(t => ({ x: t.x, y: t.y, name: t.object }));
+  const seen = new Set();
+  const cands = [];
+  for (const c of [...CHESTS_PREFER.map(([x, y]) => ({ x, y, name: 'prefer' })), ...scanned]) {
+    if (CHESTS_AVOID.some(([ax, ay]) => ax === c.x && ay === c.y)) continue;
+    const k = c.x + ',' + c.y;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    cands.push(c);
+  }
+  if (!cands.length) return null;
+  if (!wantFree) return cands[0];
+  // 近的先试(走位代价小); 全满就返回最近的并带上 full:true 让调用方能报"该做新箱"
+  let bestFull = null;
+  for (const c of cands) {
+    let r = null;
+    try { r = await post('/chest', { x: c.x, y: c.y }); } catch { /* 读不到就当空位未知, 让它试一次 */ }
+    if (!r || !r.ok) continue;
+    if ((r.used ?? 0) < (r.capacity ?? 36)) return { ...c, used: r.used, capacity: r.capacity };
+    if (!bestFull) bestFull = { ...c, used: r.used, capacity: r.capacity, full: true };
+  }
+  return bestFull || cands[0];
 }
 
 // 按名字存一件进木箱 (纯 HTTP, 不需要 UI)
-export async function storeToChest(name, chest) {
+export async function storeToChest(name, chest, opts = {}) {
   // 2026-11-05 坑: 箱满时 /store 假 ok(桥返回 ok 但物品没动) → 清仓循环空转。铁律②: 存完重读背包确认真少了。
-  const before = invCount(await st(), name);
-  const r = await post('/store', { name, x: chest.x, y: chest.y });
+  // 2026-11-08 坑(§84, 与 lib.mjs 同步): ①/store 默认 keepTools=true, 而武器(MeleeWeapon)是 Tool 子类
+  //   → 全被跳过(stored:[]) → 必须显式 keepTools:false。
+  // ② 家具/部分物品 Name 是本地化的 → 英文名匹配不上, displayName 兜底再试一次。
+  // ⚠️2026-11-12: 这两条 lib.mjs 早修了, lib-fish 漏同步 → 她背包 36/36 一直存不进去。
+  // ⚠️2026-11-12 第二坑: shouldStore 是纯名字判定, 而 Cheese(125体力)/Bread/Salad 这些**口粮**
+  //   全被判"该存箱" → 满包清仓会把她的体力来源一起存走, 之后体力见底只能干等。
+  //   判据用 state 里的 edibleValue>0(权威字段, 不用枚举物品名)。allowFood:true 可强行存。
+  const s0 = await st();
+  const it0 = (s0.inventory || []).find(i => i.name === name);
+  if (!opts.allowFood && (it0?.edibleValue ?? 0) > 0) {
+    log('!! 拒绝存箱 ' + name + ' —— 可食用(edible=' + it0.edibleValue + ')=体力口粮, 铁律级保护');
+    return false;
+  }
+  const before = invCount(s0, name);
+  const r = await post('/store', { name, x: chest.x, y: chest.y, keepTools: false });
   if (r.error) return false;
   await sleep(300);
-  if (invCount(await st(), name) >= before) { log('存箱没生效(' + name + ') —— 箱子满了? 该换箱/做新箱'); return false; }
-  return true;
+  if (invCount(await st(), name) < before) return true;
+  const dn = it0?.displayName;
+  if (dn && dn !== name) {
+    const r2 = await post('/store', { name: dn, x: chest.x, y: chest.y, keepTools: false });
+    if (r2.error) return false;
+    await sleep(300);
+    if (invCount(await st(), name) < before) return true;
+  }
+  log('存箱没生效(' + name + ') —— 箱满/名字不匹配? 该换箱/做新箱');
+  return false;
 }
 
 // 合成木箱 (需 50 木)
